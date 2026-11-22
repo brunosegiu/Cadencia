@@ -1,0 +1,57 @@
+[package]
+name = "cadence"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform Ligne Claire stylized indoor cycling training app (Rust + WebGPU/wgpu + WASM)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "cadence"
+path = "src/main.rs"
+
+[features]
+default = ["ble"]
+ble = ["dep:btleplug", "dep:tokio", "dep:futures-util"]
+
+[dependencies]
+wgpu = "30.0"
+winit = { version = "0.30", features = ["rwh_06"] }
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+egui-winit = { version = "0.37", default-features = false, features = ["links"] }
+glam = { version = "0.29", features = ["bytemuck"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names"] }
+web-time = "1.1"
+log = "0.4"
+uuid = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "0.4"
+env_logger = "0.11"
+image = { version = "0.25", default-features = false, features = ["png"] }
+btleplug = { version = "0.13", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+futures-util = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Navigator",
+    "Performance",
+    "console",
+] }
+console_error_panic_hook = "0.1"
+wgpu = { version = "30.0", features = ["webgl"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+winit = { version = "0.30", features = ["android-native-activity"] }

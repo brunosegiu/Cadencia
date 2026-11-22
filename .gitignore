@@ -1,0 +1,4 @@
+/target
+**/*.blend1
+*.tmp
+screenshots/capture.png
