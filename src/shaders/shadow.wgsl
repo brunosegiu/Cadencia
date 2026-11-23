@@ -48,14 +48,14 @@ fn animate_upper_body(local_pos: vec3<f32>, anim_phase: f32) -> vec3<f32> {
     let hand_lock = 1.0 - smoothstep(0.30, 0.61, y_bl);
     let torso_w = smoothstep(0.04, 0.38, z_bl) * hand_lock;
 
-    let sway_x = 0.013 * sin(anim_phase) * torso_w;
-    let bob_z  = (0.009 * sin(anim_phase * 2.0) + 0.005 * cos(anim_phase * 0.85)) * torso_w;
-    let breath_y = 0.007 * sin(anim_phase * 2.0) * torso_w;
+    let sway_x = 0.011 * sin(anim_phase) * torso_w;
+    let bob_z  = (0.0076 * sin(anim_phase * 2.0) + 0.0042 * cos(anim_phase * 0.85)) * torso_w;
+    let breath_y = 0.006 * sin(anim_phase * 2.0) * torso_w;
 
     let elbow_zone = exp(-pow((y_bl - 0.37) / 0.13, 2.0)) * smoothstep(0.11, 0.18, abs(x));
     let side_phase = anim_phase + select(3.14159265, 0.0, x >= 0.0);
-    let elbow_dx = side * 0.014 * (0.5 + 0.5 * sin(side_phase)) * elbow_zone;
-    let elbow_dz = -0.016 * (0.5 + 0.5 * cos(side_phase)) * elbow_zone;
+    let elbow_dx = side * 0.012 * (0.5 + 0.5 * sin(side_phase)) * elbow_zone;
+    let elbow_dz = -0.0136 * (0.5 + 0.5 * cos(side_phase)) * elbow_zone;
 
     return vec3<f32>(
         local_pos.x + sway_x + elbow_dx,

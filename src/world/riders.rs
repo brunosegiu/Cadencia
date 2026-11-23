@@ -221,7 +221,7 @@ pub fn build_rider_draw_parts(
 
     // Continuous pedaling + idle breathing/sway animation phase for torso, shoulders, elbows, and neck/head!
     let rider_seed = (base_object_id as f32) * 0.37;
-    let anim_phase = crank_angle_rad + time_s * 2.1 + rider_seed;
+    let anim_phase = crank_angle_rad + time_s * 1.8 + rider_seed;
 
     // Unified seamless skinned cyclist body + shorts + thighs + knees + calves + shoes (id +2)
     push_skinned(
@@ -244,13 +244,13 @@ pub fn build_rider_draw_parts(
         );
     }
 
-    // Neck & Head idle + pedaling animation (shoulder-follow sway, breathing bob, look-around yaw, nod pitch, counter-roll)
-    let head_sway_x = 0.013 * anim_phase.sin();
-    let head_bob_y  = 0.009 * (anim_phase * 2.0).sin() + 0.005 * (anim_phase * 0.85).cos();
-    let head_fwd_z  = -0.007 * (anim_phase * 2.0).sin();
-    let head_yaw    = 0.065 * (time_s * 0.9 + rider_seed).sin() + 0.028 * anim_phase.cos() - lean_angle_rad * 0.35;
-    let head_pitch  = 0.038 * (anim_phase * 2.0).cos() + 0.022 * (time_s * 1.7 + rider_seed).sin();
-    let head_roll   = -0.042 * anim_phase.sin() + 0.018 * (time_s * 1.3 + rider_seed).cos();
+    // Neck & Head subtle idle + pedaling animation (toned down ~15%: shoulder-follow sway, breathing bob, look-around yaw, nod pitch, counter-roll)
+    let head_sway_x = 0.011 * anim_phase.sin();
+    let head_bob_y  = 0.0076 * (anim_phase * 2.0).sin() + 0.0042 * (anim_phase * 0.85).cos();
+    let head_fwd_z  = -0.006 * (anim_phase * 2.0).sin();
+    let head_yaw    = 0.055 * (time_s * 0.85 + rider_seed).sin() + 0.024 * anim_phase.cos() - lean_angle_rad * 0.30;
+    let head_pitch  = 0.032 * (anim_phase * 2.0).cos() + 0.019 * (time_s * 1.5 + rider_seed).sin();
+    let head_roll   = -0.036 * anim_phase.sin() + 0.015 * (time_s * 1.2 + rider_seed).cos();
 
     let head_xform = Mat4::from_translation(Vec3::new(
         head_sway_x,
