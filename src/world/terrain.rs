@@ -3,8 +3,8 @@ use glam::{Mat4, Vec3};
 use crate::assets::{ModelId, SceneVertex};
 use crate::world::{BiomeId, RouteSpline};
 
-pub const OCTREE_MAX_DEPTH: usize = 3;
-pub const MAX_OCTREE_SECTORS: usize = 120; // fits in 128-bit mask [u32; 4] with bit 127 reserved for dynamic riders
+pub const OCTREE_MAX_DEPTH: usize = 4;
+pub const MAX_OCTREE_SECTORS: usize = 126; // fits in 128-bit mask [u32; 4] with bit 127 reserved for dynamic riders
 
 /// 6-plane view/light frustum extracted via Gribb-Hartmann method.
 /// Each plane `[nx, ny, nz, d]` has inward-pointing unit normal `(nx, ny, nz)`
@@ -194,7 +194,10 @@ fn build_recursive_octree_node(
         leaf_sector_id: None,
     });
 
-    if depth >= OCTREE_MAX_DEPTH || (*next_sector_id as usize) + 8 > MAX_OCTREE_SECTORS {
+    if depth >= OCTREE_MAX_DEPTH
+        || (depth >= 3 && pt_indices.len() < 22)
+        || (*next_sector_id as usize) + 32 > MAX_OCTREE_SECTORS
+    {
         let sid = *next_sector_id;
         *next_sector_id += 1;
         nodes[node_idx].leaf_sector_id = Some(sid);

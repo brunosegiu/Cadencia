@@ -58,6 +58,32 @@ impl SceneVertex {
         }
     }
 
+    pub fn new_packed_prop(
+        pos: [f32; 3],
+        normal: [f32; 3],
+        uv: [u16; 2],
+        rgb: [u8; 3],
+        material_type: u8,
+        object_id: u32,
+        outline_weight: f32,
+        has_crease: bool,
+    ) -> Self {
+        let outline_q3 = ((outline_weight.clamp(0.0, 1.0) * 7.0).round() as u8).min(7);
+        let crease_bit = if has_crease { 1u8 } else { 0u8 };
+        let packed_mat = (material_type & 7) | (outline_q3 << 3) | (crease_bit << 6);
+        Self {
+            pos,
+            normal_mat: [
+                pack_snorm8(normal[0]),
+                pack_snorm8(normal[1]),
+                pack_snorm8(normal[2]),
+                packed_mat as i8,
+            ],
+            uv,
+            color: [rgb[0], rgb[1], rgb[2], (object_id.min(255)) as u8],
+        }
+    }
+
     pub fn set_normal(&mut self, normal: [f32; 3]) {
         self.normal_mat[0] = pack_snorm8(normal[0]);
         self.normal_mat[1] = pack_snorm8(normal[1]);

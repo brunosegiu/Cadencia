@@ -46,6 +46,7 @@ struct SceneOut {
     @location(4) color: vec4<f32>,
     @location(5) @interpolate(flat) material_type: u32,
     @location(6) view_depth: f32,
+    @location(7) @interpolate(flat) vertex_obj_info: vec3<f32>,
 };
 
 struct GBufferOut {
@@ -84,10 +85,16 @@ fn value_noise(p: vec2<f32>) -> f32 {
 fn vs_scene(in: VertexInput) -> SceneOut {
     let wp = obj.model * vec4<f32>(in.pos, 1.0);
     let local_nrm = normalize(in.normal_mat.xyz);
-    let mat_id = u32(round(max(in.normal_mat.w * 127.0, 0.0)));
+    let raw_mat = u32(round(max(in.normal_mat.w * 127.0, 0.0)));
+    let mat_id = raw_mat & 7u;
     let wn = normalize((obj.normal_mat * vec4<f32>(local_nrm, 0.0)).xyz);
     let vn = normalize((frame.view_mat * vec4<f32>(wn, 0.0)).xyz);
     let vp = frame.view_mat * wp;
+
+    let use_vtx_meta = obj.obj_info.w > 0.5;
+    let v_obj_id = select(obj.obj_info.x, in.color.a, use_vtx_meta);
+    let v_outline_w = select(obj.obj_info.y, f32((raw_mat >> 3u) & 7u) / 7.0, use_vtx_meta);
+    let v_crease_s = select(obj.obj_info.z, select(0.0, 0.45, ((raw_mat >> 6u) & 1u) != 0u), use_vtx_meta);
 
     var out: SceneOut;
     out.clip_pos = frame.view_proj * wp;
@@ -95,9 +102,10 @@ fn vs_scene(in: VertexInput) -> SceneOut {
     out.world_normal = wn;
     out.view_normal = vn;
     out.uv = in.uv;
-    out.color = in.color * obj.tint;
+    out.color = vec4<f32>(in.color.rgb * obj.tint.rgb, 1.0);
     out.material_type = mat_id;
     out.view_depth = -vp.z;
+    out.vertex_obj_info = vec3<f32>(v_obj_id, v_outline_w, v_crease_s);
     return out;
 }
 
@@ -123,62 +131,99 @@ fn sample_cascade_layer_pcf(shadow_pos: vec4<f32>, layer: i32, bias: f32, filter
     return mix(1.0, sum / 9.0, in_bounds);
 }
 
+fn sample_cascade_layer_pcf4(shadow_pos: vec4<f32>, layer: i32, bias: f32, filter_radius: f32) -> f32 {
+    let ndc = shadow_pos.xyz / shadow_pos.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    let depth = ndc.z;
+    let step_uv = (1.0 / 2048.0) * 0.65 * filter_radius;
+    let cmp_depth = depth - bias;
+
+    var sum = 0.0;
+    sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-step_uv, -step_uv), layer, cmp_depth);
+    sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>( step_uv, -step_uv), layer, cmp_depth);
+    sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(-step_uv,  step_uv), layer, cmp_depth);
+    sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>( step_uv,  step_uv), layer, cmp_depth);
+
+    let in_bounds = f32(
+        uv.x >= 0.005 && uv.x <= 0.995 &&
+        uv.y >= 0.005 && uv.y <= 0.995 &&
+        depth >= 0.0 && depth <= 1.0
+    );
+    return mix(1.0, sum * 0.25, in_bounds);
+}
+
+fn sample_cascade_layer_fast1(shadow_pos: vec4<f32>, layer: i32, bias: f32) -> f32 {
+    let ndc = shadow_pos.xyz / shadow_pos.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    let depth = ndc.z;
+    let s = textureSampleCompareLevel(shadow_map, shadow_sampler, uv, layer, depth - bias);
+    let in_bounds = f32(
+        uv.x >= 0.005 && uv.x <= 0.995 &&
+        uv.y >= 0.005 && uv.y <= 0.995 &&
+        depth >= 0.0 && depth <= 1.0
+    );
+    return mix(1.0, s, in_bounds);
+}
+
 fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: f32, ndotl: f32) -> f32 {
-    if (frame.cascade_splits.w < 0.5) {
+    if (frame.cascade_splits.w < 0.5 || view_depth >= frame.cascade_splits.z) {
         return 1.0;
     }
     let slope = clamp(1.0 - ndotl, 0.0, 1.0);
 
-    let wp0 = vec4<f32>(world_pos + world_normal * (0.004 * slope), 1.0);
-    let wp1 = vec4<f32>(world_pos + world_normal * (0.012 * slope), 1.0);
+    if (view_depth < frame.cascade_splits.x) {
+        let wp0 = vec4<f32>(world_pos + world_normal * (0.004 * slope), 1.0);
+        let sp0 = frame.light_view_proj * wp0;
+        let ndc0 = sp0.xyz / sp0.w;
+        let box0 = max(abs(ndc0.x), abs(ndc0.y));
+        if (box0 < 0.94 && ndc0.z >= 0.0 && ndc0.z <= 1.0) {
+            let bias0 = max(0.00018 * slope, 0.00005);
+            let s0 = sample_cascade_layer_pcf(sp0, 0, bias0, 1.10);
+            let blend1 = max(
+                smoothstep(0.80, 0.94, box0),
+                smoothstep(frame.cascade_splits.x * 0.82, frame.cascade_splits.x, view_depth)
+            );
+            if (blend1 > 0.01) {
+                let wp1 = vec4<f32>(world_pos + world_normal * (0.012 * slope), 1.0);
+                let sp1 = frame.light_view_proj_c1 * wp1;
+                let bias1 = max(0.00030 * slope, 0.00010);
+                let s1 = sample_cascade_layer_pcf4(sp1, 1, bias1, 1.0);
+                return mix(s0, s1, blend1);
+            }
+            return s0;
+        }
+    }
+
+    if (view_depth < frame.cascade_splits.y) {
+        let wp1 = vec4<f32>(world_pos + world_normal * (0.012 * slope), 1.0);
+        let sp1 = frame.light_view_proj_c1 * wp1;
+        let ndc1 = sp1.xyz / sp1.w;
+        let box1 = max(abs(ndc1.x), abs(ndc1.y));
+        if (box1 < 0.95 && ndc1.z >= 0.0 && ndc1.z <= 1.0) {
+            let bias1 = max(0.00030 * slope, 0.00010);
+            let s1 = sample_cascade_layer_pcf4(sp1, 1, bias1, 1.0);
+            let blend2 = max(
+                smoothstep(0.82, 0.95, box1),
+                smoothstep(frame.cascade_splits.y * 0.84, frame.cascade_splits.y, view_depth)
+            );
+            if (blend2 > 0.01) {
+                let wp2 = vec4<f32>(world_pos + world_normal * (0.032 * slope), 1.0);
+                let sp2 = frame.light_view_proj_c2 * wp2;
+                let bias2 = max(0.00042 * slope, 0.00015);
+                let s2 = sample_cascade_layer_fast1(sp2, 2, bias2);
+                return mix(s1, s2, blend2);
+            }
+            return s1;
+        }
+    }
+
     let wp2 = vec4<f32>(world_pos + world_normal * (0.032 * slope), 1.0);
-
-    let sp0 = frame.light_view_proj * wp0;
-    let sp1 = frame.light_view_proj_c1 * wp1;
     let sp2 = frame.light_view_proj_c2 * wp2;
-
-    let ndc0 = sp0.xyz / sp0.w;
-    let ndc1 = sp1.xyz / sp1.w;
     let ndc2 = sp2.xyz / sp2.w;
-
-    let box0 = max(abs(ndc0.x), abs(ndc0.y));
-    let box1 = max(abs(ndc1.x), abs(ndc1.y));
     let box2 = max(abs(ndc2.x), abs(ndc2.y));
-
-    let bias0 = max(0.00018 * slope, 0.00005);
-    let bias1 = max(0.00030 * slope, 0.00010);
-    let bias2 = max(0.00042 * slope, 0.00015);
-
-    let fits0 = box0 < 0.94 && ndc0.z >= 0.0 && ndc0.z <= 1.0 && view_depth < frame.cascade_splits.x;
-    let fits1 = box1 < 0.95 && ndc1.z >= 0.0 && ndc1.z <= 1.0 && view_depth < frame.cascade_splits.y;
-    let fits2 = box2 < 0.97 && ndc2.z >= 0.0 && ndc2.z <= 1.0 && view_depth < frame.cascade_splits.z;
-
-    if (fits0) {
-        let s0 = sample_cascade_layer_pcf(sp0, 0, bias0, 1.10);
-        let blend1 = max(
-            smoothstep(0.80, 0.94, box0),
-            smoothstep(frame.cascade_splits.x * 0.82, frame.cascade_splits.x, view_depth)
-        );
-        if (blend1 > 0.01 && fits1) {
-            let s1 = sample_cascade_layer_pcf(sp1, 1, bias1, 1.0);
-            return mix(s0, s1, blend1);
-        }
-        return s0;
-    }
-    if (fits1) {
-        let s1 = sample_cascade_layer_pcf(sp1, 1, bias1, 1.0);
-        let blend2 = max(
-            smoothstep(0.82, 0.95, box1),
-            smoothstep(frame.cascade_splits.y * 0.84, frame.cascade_splits.y, view_depth)
-        );
-        if (blend2 > 0.01 && fits2) {
-            let s2 = sample_cascade_layer_pcf(sp2, 2, bias2, 0.9);
-            return mix(s1, s2, blend2);
-        }
-        return s1;
-    }
-    if (fits2) {
-        let s2 = sample_cascade_layer_pcf(sp2, 2, bias2, 0.9);
+    if (box2 < 0.97 && ndc2.z >= 0.0 && ndc2.z <= 1.0) {
+        let bias2 = max(0.00042 * slope, 0.00015);
+        let s2 = sample_cascade_layer_fast1(sp2, 2, bias2);
         let fade_far = max(
             smoothstep(0.84, 0.97, box2),
             smoothstep(frame.cascade_splits.z * 0.80, frame.cascade_splits.z, view_depth)
@@ -197,8 +242,9 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
 
     var albedo = in.color.rgb;
     var mat_type = in.material_type;
-    var outline_w = obj.obj_info.y;
-    var crease_s = obj.obj_info.z;
+    var outline_w = in.vertex_obj_info.y;
+    var crease_s = in.vertex_obj_info.z;
+    let obj_id = in.vertex_obj_info.x;
 
     // Procedural Ligne Claire surface texture & markings
     if (mat_type == 1u) {
@@ -290,6 +336,6 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
     var out: GBufferOut;
     out.lit_color = vec4<f32>(clamp(lit_col, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(outline_w, 0.0, 1.0));
     let oct_n = oct_encode(normalize(in.view_normal));
-    out.normal_id = vec4<f32>(oct_n.x, oct_n.y, clamp(crease_s, 0.0, 1.0), obj.obj_info.x);
+    out.normal_id = vec4<f32>(oct_n.x, oct_n.y, clamp(crease_s, 0.0, 1.0), obj_id);
     return out;
 }

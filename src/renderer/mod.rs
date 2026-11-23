@@ -182,12 +182,6 @@ struct GpuModel {
 }
 
 struct GpuWorldOffsets {
-    road_base_vertex: i32,
-    road_first_index: u32,
-    terrain_base_vertex: i32,
-    terrain_first_index: u32,
-    wire_base_vertex: i32,
-    wire_first_index: u32,
     water_base_vertex: i32,
     water_first_index: u32,
     water_index_count: u32,
@@ -213,11 +207,23 @@ struct EnqueuedCommandRef {
     shadow_candidate: bool,
 }
 
+#[derive(Clone, Copy)]
+struct StaticSectorCmd {
+    sector_id: usize,
+    cmd_slot: usize,
+    uniform_idx: usize, // 0 = road, 1 = terrain, 2 = wire, 3 = baked_prop_tier
+    shadow_candidate: bool,
+    caster_tier: u8,    // 0 = none, 1 = C0 only, 2 = C0..C1, 3 = C0..C2
+}
+
 pub struct LigneClaireRenderer {
     pub output_format: wgpu::TextureFormat,
     models: HashMap<ModelId, GpuModel>,
     static_model_verts: Vec<SceneVertex>,
     static_model_indices: Vec<u32>,
+    static_draw_descs: Vec<GpuDrawDesc>,
+    static_sector_cmds: Vec<StaticSectorCmd>,
+    static_descs_dirty: bool,
 
     mega_vb: wgpu::Buffer,
     mega_ib: wgpu::Buffer,
@@ -347,12 +353,6 @@ impl LigneClaireRenderer {
         });
 
         let world_offsets = GpuWorldOffsets {
-            road_base_vertex: 0,
-            road_first_index: 0,
-            terrain_base_vertex: 0,
-            terrain_first_index: 0,
-            wire_base_vertex: 0,
-            wire_first_index: 0,
             water_base_vertex: 0,
             water_first_index: 0,
             water_index_count: 0,
@@ -1005,6 +1005,9 @@ impl LigneClaireRenderer {
             models,
             static_model_verts,
             static_model_indices,
+            static_draw_descs: Vec::new(),
+            static_sector_cmds: Vec::new(),
+            static_descs_dirty: true,
             mega_vb,
             mega_ib,
             world_offsets,
@@ -1190,6 +1193,7 @@ impl LigneClaireRenderer {
                 + geo.terrain_vertices.len()
                 + geo.wire_vertices.len()
                 + geo.water_vertices.len()
+                + geo.props.len() * 96
                 + MAX_SKINNED_VERTS,
         );
         let mut all_indices = Vec::with_capacity(
@@ -1197,7 +1201,8 @@ impl LigneClaireRenderer {
                 + geo.road_indices.len()
                 + geo.terrain_indices.len()
                 + geo.wire_indices.len()
-                + geo.water_indices.len(),
+                + geo.water_indices.len()
+                + geo.props.len() * 160,
         );
 
         all_verts.extend_from_slice(&self.static_model_verts);
@@ -1224,6 +1229,188 @@ impl LigneClaireRenderer {
         all_verts.extend_from_slice(&geo.water_vertices);
         all_indices.extend_from_slice(&geo.water_indices);
 
+        // Pre-bake static sector draw descriptors and per-sector CSM-size-tiered prop meshes
+        let mut static_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(geo.sectors.len() * 7);
+        let mut static_sector_cmds: Vec<StaticSectorCmd> = Vec::with_capacity(geo.sectors.len() * 7);
+
+        for (sid, sec) in geo.sectors.iter().enumerate() {
+            let sec_flag = (sid as u32) | 512u32; // bit 9 = is_sector_surface
+            if sec.road_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = static_draw_descs.len();
+                static_draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.road_index_count,
+                    first_index: road_first_index + sec.road_index_offset,
+                    base_vertex: road_base_vertex,
+                    flags: sec_flag,
+                });
+                static_sector_cmds.push(StaticSectorCmd {
+                    sector_id: sid,
+                    cmd_slot: slot,
+                    uniform_idx: 0,
+                    shadow_candidate: false,
+                    caster_tier: 0,
+                });
+            }
+            if sec.terrain_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = static_draw_descs.len();
+                static_draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.terrain_index_count,
+                    first_index: terrain_first_index + sec.terrain_index_offset,
+                    base_vertex: terrain_base_vertex,
+                    flags: sec_flag,
+                });
+                static_sector_cmds.push(StaticSectorCmd {
+                    sector_id: sid,
+                    cmd_slot: slot,
+                    uniform_idx: 1,
+                    shadow_candidate: false,
+                    caster_tier: 0,
+                });
+            }
+            if sec.wire_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = static_draw_descs.len();
+                static_draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.wire_index_count,
+                    first_index: wire_first_index + sec.wire_index_offset,
+                    base_vertex: wire_base_vertex,
+                    flags: sec_flag,
+                });
+                static_sector_cmds.push(StaticSectorCmd {
+                    sector_id: sid,
+                    cmd_slot: slot,
+                    uniform_idx: 2,
+                    shadow_candidate: false,
+                    caster_tier: 0,
+                });
+            }
+
+            if !sec.prop_indices.is_empty() {
+                let mut tier_verts: [Vec<SceneVertex>; 4] =
+                    std::array::from_fn(|_| Vec::new());
+                let mut tier_indices: [Vec<u32>; 4] =
+                    std::array::from_fn(|_| Vec::new());
+                let mut tier_min = [Vec3::splat(f32::INFINITY); 4];
+                let mut tier_max = [Vec3::splat(f32::NEG_INFINITY); 4];
+
+                for &pi in &sec.prop_indices {
+                    let p = &geo.props[pi];
+                    let Some(gpu_model) = self.models.get(&p.model) else {
+                        continue;
+                    };
+                    let sx = p.transform.x_axis.truncate().length();
+                    let sy = p.transform.y_axis.truncate().length();
+                    let sz = p.transform.z_axis.truncate().length();
+                    let max_scale = sx.max(sy).max(sz).max(0.01);
+                    let world_radius = gpu_model.bounding_radius * max_scale;
+
+                    let tier_idx = if !p.cast_shadow {
+                        0
+                    } else if world_radius < 0.90 {
+                        1
+                    } else if world_radius < 2.50 {
+                        2
+                    } else {
+                        3
+                    };
+                    let has_crease = matches!(
+                        p.model,
+                        ModelId::ColonialTownhouse
+                            | ModelId::CoastalBuildingTall
+                            | ModelId::CoastalBuildingMid
+                            | ModelId::RanchHouse
+                    );
+                    let normal_mat = glam::Mat3::from_mat4(p.transform).inverse().transpose();
+
+                    for ms in &gpu_model.sections {
+                        let local_v_base = tier_verts[tier_idx].len() as u32;
+                        let v_start = ms.base_vertex as usize;
+                        let v_end = v_start + (ms.vertex_count as usize);
+                        for sv in &self.static_model_verts[v_start..v_end] {
+                            let wp = p.transform.transform_point3(Vec3::from_array(sv.pos));
+                            tier_min[tier_idx] = tier_min[tier_idx].min(wp);
+                            tier_max[tier_idx] = tier_max[tier_idx].max(wp);
+                            let ln = Vec3::new(
+                                (sv.normal_mat[0] as f32) / 127.0,
+                                (sv.normal_mat[1] as f32) / 127.0,
+                                (sv.normal_mat[2] as f32) / 127.0,
+                            );
+                            let wn = (normal_mat * ln).normalize_or_zero();
+                            let mat_type = (sv.normal_mat[3].max(0) as u8) & 7;
+                            let rgb = [
+                                ((sv.color[0] as f32) * p.tint[0]).clamp(0.0, 255.0).round() as u8,
+                                ((sv.color[1] as f32) * p.tint[1]).clamp(0.0, 255.0).round() as u8,
+                                ((sv.color[2] as f32) * p.tint[2]).clamp(0.0, 255.0).round() as u8,
+                            ];
+                            let packed_v = SceneVertex::new_packed_prop(
+                                wp.to_array(),
+                                wn.to_array(),
+                                sv.uv,
+                                rgb,
+                                mat_type,
+                                p.object_id,
+                                p.outline_weight,
+                                has_crease,
+                            );
+                            tier_verts[tier_idx].push(packed_v);
+                        }
+                        let i_start = ms.first_index as usize;
+                        let i_end = i_start + (ms.index_count as usize);
+                        tier_indices[tier_idx].extend(
+                            self.static_model_indices[i_start..i_end]
+                                .iter()
+                                .map(|&idx| local_v_base + idx),
+                        );
+                    }
+                }
+
+                for tier_idx in 0..4 {
+                    if tier_indices[tier_idx].is_empty()
+                        || static_draw_descs.len() >= MAX_INDIRECT_COMMANDS
+                    {
+                        continue;
+                    }
+                    let tier_base_vertex = all_verts.len() as i32;
+                    let tier_first_index = all_indices.len() as u32;
+                    let tier_index_count = tier_indices[tier_idx].len() as u32;
+                    all_verts.extend_from_slice(&tier_verts[tier_idx]);
+                    all_indices.extend_from_slice(&tier_indices[tier_idx]);
+
+                    let t_center = (tier_min[tier_idx] + tier_max[tier_idx]) * 0.5;
+                    let t_radius = (tier_max[tier_idx] - t_center).length().max(0.5);
+                    let (cast_shadow, rep_caster_cm, caster_tier): (bool, u32, u8) = match tier_idx {
+                        0 => (false, 0, 0),
+                        1 => (true, 50, 1),  // 0.50 m -> Cascade 0 only
+                        2 => (true, 160, 2), // 1.60 m -> Cascades 0 & 1
+                        _ => (true, 600, 3), // 6.00 m -> Cascades 0, 1 & 2
+                    };
+                    let flags = (sid as u32)
+                        | if cast_shadow { 256u32 } else { 0u32 }
+                        | (rep_caster_cm << 16);
+                    let slot = static_draw_descs.len();
+                    static_draw_descs.push(GpuDrawDesc {
+                        pos_radius: [t_center.x, t_center.y, t_center.z, t_radius],
+                        index_count: tier_index_count,
+                        first_index: tier_first_index,
+                        base_vertex: tier_base_vertex,
+                        flags,
+                    });
+                    static_sector_cmds.push(StaticSectorCmd {
+                        sector_id: sid,
+                        cmd_slot: slot,
+                        uniform_idx: 3,
+                        shadow_candidate: cast_shadow,
+                        caster_tier,
+                    });
+                }
+            }
+        }
+
+        // Group static sector commands by uniform_idx so each render pass binds at most 4 static uniform offsets
+        static_sector_cmds.sort_by_key(|c| (c.uniform_idx, c.sector_id, c.cmd_slot));
+
         let skinned_base_vertex = all_verts.len() as u32;
         all_verts.resize(all_verts.len() + MAX_SKINNED_VERTS, SceneVertex::zeroed());
 
@@ -1240,17 +1427,14 @@ impl LigneClaireRenderer {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
         self.world_offsets = GpuWorldOffsets {
-            road_base_vertex,
-            road_first_index,
-            terrain_base_vertex,
-            terrain_first_index,
-            wire_base_vertex,
-            wire_first_index,
             water_base_vertex,
             water_first_index,
             water_index_count,
             skinned_base_vertex,
         };
+        self.static_draw_descs = static_draw_descs;
+        self.static_sector_cmds = static_sector_cmds;
+        self.static_descs_dirty = true;
         self.skin_bg = Self::make_skin_bg(
             device,
             &self.skin_bgl,
@@ -1261,6 +1445,7 @@ impl LigneClaireRenderer {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_obj_uniform(
         &mut self,
         device: &wgpu::Device,
@@ -1270,6 +1455,7 @@ impl LigneClaireRenderer {
         object_id: u32,
         outline_weight: f32,
         crease_sensitivity: f32,
+        use_vertex_meta: bool,
     ) -> u32 {
         if idx >= self.obj_capacity {
             let new_cap = (idx + 512).next_power_of_two();
@@ -1283,7 +1469,11 @@ impl LigneClaireRenderer {
             self.obj_staging.resize(self.obj_align * new_cap, 0);
             self.obj_capacity = new_cap;
         }
-        let normal_mat = model.inverse().transpose();
+        let normal_mat = if model == Mat4::IDENTITY {
+            Mat4::IDENTITY
+        } else {
+            model.inverse().transpose()
+        };
         let u = ObjectUniforms {
             model: model.to_cols_array_2d(),
             normal_mat: normal_mat.to_cols_array_2d(),
@@ -1292,7 +1482,7 @@ impl LigneClaireRenderer {
                 (object_id.min(255) as f32) / 255.0,
                 outline_weight,
                 crease_sensitivity,
-                0.0,
+                if use_vertex_meta { 1.0 } else { 0.0 },
             ],
             skin_pose_r: [0.0; 4],
             skin_pose_l: [0.0; 4],
@@ -1527,8 +1717,7 @@ impl LigneClaireRenderer {
         // Bit 127 reserved for dynamic cyclists
         let mut cam_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
         let mut shadow_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
-        let mut union_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
-        let mut active_sector_ids: Vec<usize> = Vec::with_capacity(geo.sectors.len());
+        let mut csm_sector_masks = [[0u32, 0u32, 0u32, 1u32 << 31]; NUM_SHADOW_CASCADES];
 
         // 1. Traverse 3D WorldOctree against Camera View Frustum on CPU
         let mut cam_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
@@ -1536,34 +1725,39 @@ impl LigneClaireRenderer {
         for sid in cam_vis_sectors {
             if sid < geo.sectors.len() {
                 set_sector_bit(&mut cam_sector_mask, sid);
-                if !is_sector_bit(&union_sector_mask, sid) {
-                    set_sector_bit(&mut union_sector_mask, sid);
-                    active_sector_ids.push(sid);
-                }
             }
         }
 
         // 2. Traverse 3D WorldOctree against CSM Shadow Frustums on CPU
         if graphics.shadows_enabled {
             let mut csm_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
-            for csm_f in &csm_frustums {
+            for (ci, csm_f) in csm_frustums.iter().enumerate() {
                 csm_vis_sectors.clear();
                 geo.octree.query_frustum(csm_f, &mut csm_vis_sectors);
                 for &sid in &csm_vis_sectors {
                     if sid < geo.sectors.len() {
                         set_sector_bit(&mut shadow_sector_mask, sid);
-                        if !is_sector_bit(&union_sector_mask, sid) {
-                            set_sector_bit(&mut union_sector_mask, sid);
-                            active_sector_ids.push(sid);
-                        }
+                        set_sector_bit(&mut csm_sector_masks[ci], sid);
                     }
                 }
             }
         }
 
+        if self.static_descs_dirty {
+            if !self.static_draw_descs.is_empty() {
+                queue.write_buffer(
+                    &self.draw_desc_buf,
+                    0,
+                    bytemuck::cast_slice(&self.static_draw_descs),
+                );
+            }
+            self.static_descs_dirty = false;
+        }
+
+        let static_cmd_base = self.static_draw_descs.len();
         let mut draw_count = 0usize;
-        let mut draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(2048);
-        let mut enqueued_cmds: Vec<EnqueuedCommandRef> = Vec::with_capacity(2048);
+        let mut rider_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(96);
+        let mut rider_cmds: Vec<EnqueuedCommandRef> = Vec::with_capacity(96);
         let mut skin_jobs: Vec<SkinJob> = Vec::with_capacity(32);
         let mut max_skin_verts_in_job = 0u32;
         let mut skinned_vert_cursor = self.world_offsets.skinned_base_vertex;
@@ -1575,120 +1769,36 @@ impl LigneClaireRenderer {
             sx.max(sy).max(sz).max(0.01)
         };
 
-        // 1. Enqueue active sector road, terrain, wire slices & sector props
-        let road_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0);
+        // 1. Static world ObjectUniform slots (4 shared slots for the entire static world)
+        let road_off =
+            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0, false);
         draw_count += 1;
-        let terrain_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0);
+        let terrain_off =
+            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0, false);
         draw_count += 1;
-        let wire_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0);
+        let wire_off =
+            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0, false);
         draw_count += 1;
+        let prop_tier_off =
+            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 0, 0.0, 0.0, true);
+        draw_count += 1;
+        let static_uniform_offsets = [road_off, terrain_off, wire_off, prop_tier_off];
         let water_off = if self.world_offsets.water_index_count > 0 {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 4, 0.0, 0.0);
+            let off = self.push_obj_uniform(
+                device,
+                draw_count,
+                Mat4::IDENTITY,
+                [1.0; 4],
+                4,
+                0.0,
+                0.0,
+                false,
+            );
             draw_count += 1;
             Some(off)
         } else {
             None
         };
-
-        for &sid in &active_sector_ids {
-            let sec = &geo.sectors[sid];
-            let sec_flag = (sid as u32) | 512u32; // bit 9 = is_sector_surface
-            if sec.road_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = draw_descs.len();
-                draw_descs.push(GpuDrawDesc {
-                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
-                    index_count: sec.road_index_count,
-                    first_index: self.world_offsets.road_first_index + sec.road_index_offset,
-                    base_vertex: self.world_offsets.road_base_vertex,
-                    flags: sec_flag,
-                });
-                enqueued_cmds.push(EnqueuedCommandRef {
-                    cmd_slot: slot,
-                    offset_bytes: road_off,
-                    shadow_candidate: false,
-                });
-            }
-            if sec.terrain_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = draw_descs.len();
-                draw_descs.push(GpuDrawDesc {
-                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
-                    index_count: sec.terrain_index_count,
-                    first_index: self.world_offsets.terrain_first_index + sec.terrain_index_offset,
-                    base_vertex: self.world_offsets.terrain_base_vertex,
-                    flags: sec_flag,
-                });
-                enqueued_cmds.push(EnqueuedCommandRef {
-                    cmd_slot: slot,
-                    offset_bytes: terrain_off,
-                    shadow_candidate: false,
-                });
-            }
-            if sec.wire_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = draw_descs.len();
-                draw_descs.push(GpuDrawDesc {
-                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
-                    index_count: sec.wire_index_count,
-                    first_index: self.world_offsets.wire_first_index + sec.wire_index_offset,
-                    base_vertex: self.world_offsets.wire_base_vertex,
-                    flags: sec_flag,
-                });
-                enqueued_cmds.push(EnqueuedCommandRef {
-                    cmd_slot: slot,
-                    offset_bytes: wire_off,
-                    shadow_candidate: false,
-                });
-            }
-
-            // Enqueue all props inside this active sector; GPU compute shader culls & emits DrawIndexedIndirectCmd
-            for &pi in &sec.prop_indices {
-                if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
-                    break;
-                }
-                let p = &geo.props[pi];
-                let pos = p.transform.w_axis.truncate();
-                let (model_secs, base_bound_r) = match self.models.get(&p.model) {
-                    Some(m) => (m.sections.clone(), m.bounding_radius),
-                    None => continue,
-                };
-                let world_radius = base_bound_r * transform_max_scale(&p.transform);
-                let crease_s = match p.model {
-                    ModelId::ColonialTownhouse
-                    | ModelId::CoastalBuildingTall
-                    | ModelId::CoastalBuildingMid
-                    | ModelId::RanchHouse => 0.45,
-                    _ => 0.0,
-                };
-                let off = self.push_obj_uniform(
-                    device,
-                    draw_count,
-                    p.transform,
-                    p.tint,
-                    p.object_id,
-                    p.outline_weight,
-                    crease_s,
-                );
-                draw_count += 1;
-                let flags = (sid as u32) | if p.cast_shadow { 256u32 } else { 0u32 };
-                for ms in &model_secs {
-                    if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
-                        break;
-                    }
-                    let slot = draw_descs.len();
-                    draw_descs.push(GpuDrawDesc {
-                        pos_radius: [pos.x, pos.y, pos.z, world_radius],
-                        index_count: ms.index_count,
-                        first_index: ms.first_index,
-                        base_vertex: ms.base_vertex,
-                        flags,
-                    });
-                    enqueued_cmds.push(EnqueuedCommandRef {
-                        cmd_slot: slot,
-                        offset_bytes: off,
-                        shadow_candidate: p.cast_shadow,
-                    });
-                }
-            }
-        }
 
         // 2. Enqueue dynamic Riders (pre-skinned via Compute Shader before rendering!)
         let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(96);
@@ -1733,8 +1843,8 @@ impl LigneClaireRenderer {
         }
 
         for rp in &rider_parts {
-            let (model_secs, base_bound_r) = match self.models.get(&rp.model) {
-                Some(m) => (m.sections.clone(), m.bounding_radius),
+            let (sec_count, base_bound_r) = match self.models.get(&rp.model) {
+                Some(m) => (m.sections.len(), m.bounding_radius),
                 None => continue,
             };
             let pos = rp.transform.w_axis.truncate();
@@ -1746,10 +1856,11 @@ impl LigneClaireRenderer {
             };
             let is_skinned = rp.skin_pose_r[3] > 0.5;
 
-            for ms in &model_secs {
-                if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
+            for sec_idx in 0..sec_count {
+                if static_cmd_base + rider_draw_descs.len() >= MAX_INDIRECT_COMMANDS {
                     break;
                 }
+                let ms = self.models[&rp.model].sections[sec_idx];
                 let tint = match ms.role {
                     MaterialRole::BikeFrame => rp.frame_color,
                     MaterialRole::JerseyPrimary => rp.jersey_primary,
@@ -1767,6 +1878,7 @@ impl LigneClaireRenderer {
                     rp.object_id,
                     outline_w,
                     crease_s,
+                    false,
                 );
                 draw_count += 1;
 
@@ -1791,15 +1903,15 @@ impl LigneClaireRenderer {
                     ms.base_vertex
                 };
 
-                let slot = draw_descs.len();
-                draw_descs.push(GpuDrawDesc {
+                let slot = static_cmd_base + rider_draw_descs.len();
+                rider_draw_descs.push(GpuDrawDesc {
                     pos_radius: [pos.x, pos.y, pos.z, world_radius],
                     index_count: ms.index_count,
                     first_index: ms.first_index,
                     base_vertex: eff_base_vertex,
                     flags: 127u32 | 256u32, // sector 127 (dynamic rider), cast_shadow = true
                 });
-                enqueued_cmds.push(EnqueuedCommandRef {
+                rider_cmds.push(EnqueuedCommandRef {
                     cmd_slot: slot,
                     offset_bytes: off,
                     shadow_candidate: true,
@@ -1807,7 +1919,7 @@ impl LigneClaireRenderer {
             }
         }
 
-        // Upload object uniforms, skinning jobs, and sector draw descriptors to GPU
+        // Upload object uniforms, skinning jobs, and dynamic rider draw descriptors to GPU
         let write_bytes = draw_count * self.obj_align;
         if write_bytes > 0 {
             queue.write_buffer(&self.obj_buf, 0, &self.obj_staging[..write_bytes]);
@@ -1824,7 +1936,7 @@ impl LigneClaireRenderer {
             queue.write_buffer(&self.skin_jobs_buf, 0, bytemuck::cast_slice(&skin_jobs));
         }
 
-        let cmd_count = draw_descs.len() as u32;
+        let cmd_count = (static_cmd_base + rider_draw_descs.len()) as u32;
         let cull_u = SectorCullUniforms {
             camera_pos_max_dist: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
             cam_frustum_planes: cam_frustum.planes,
@@ -1848,8 +1960,14 @@ impl LigneClaireRenderer {
             ],
         };
         queue.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&cull_u));
-        if !draw_descs.is_empty() {
-            queue.write_buffer(&self.draw_desc_buf, 0, bytemuck::cast_slice(&draw_descs));
+        if !rider_draw_descs.is_empty() {
+            let rider_byte_offset =
+                (static_cmd_base * std::mem::size_of::<GpuDrawDesc>()) as u64;
+            queue.write_buffer(
+                &self.draw_desc_buf,
+                rider_byte_offset,
+                bytemuck::cast_slice(&rider_draw_descs),
+            );
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1914,9 +2032,30 @@ impl LigneClaireRenderer {
             rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
             let cascade_base_bytes = ((ci as u64) + 1) * pass_stride_bytes;
             if graphics.shadows_enabled {
-                for cmd in &enqueued_cmds {
+                let mut last_off: Option<u32> = None;
+                let csm_mask = &csm_sector_masks[ci];
+                let min_tier = (ci as u8) + 1;
+                for cmd in &self.static_sector_cmds {
+                    if cmd.shadow_candidate
+                        && cmd.caster_tier >= min_tier
+                        && is_sector_bit(csm_mask, cmd.sector_id)
+                    {
+                        let off = static_uniform_offsets[cmd.uniform_idx];
+                        if last_off != Some(off) {
+                            rpass.set_bind_group(1, &self.obj_bg, &[off]);
+                            last_off = Some(off);
+                        }
+                        let indirect_offset =
+                            cascade_base_bytes + (cmd.cmd_slot as u64) * indirect_cmd_size;
+                        rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                    }
+                }
+                for cmd in &rider_cmds {
                     if cmd.shadow_candidate {
-                        rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                        if last_off != Some(cmd.offset_bytes) {
+                            rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                            last_off = Some(cmd.offset_bytes);
+                        }
                         let indirect_offset =
                             cascade_base_bytes + (cmd.cmd_slot as u64) * indirect_cmd_size;
                         rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
@@ -1974,8 +2113,23 @@ impl LigneClaireRenderer {
             rpass.set_bind_group(0, &self.scene_frame_bg, &[]);
             rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
             rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
-            for cmd in &enqueued_cmds {
-                rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+            let mut last_off: Option<u32> = None;
+            for cmd in &self.static_sector_cmds {
+                if is_sector_bit(&cam_sector_mask, cmd.sector_id) {
+                    let off = static_uniform_offsets[cmd.uniform_idx];
+                    if last_off != Some(off) {
+                        rpass.set_bind_group(1, &self.obj_bg, &[off]);
+                        last_off = Some(off);
+                    }
+                    let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
+                    rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                }
+            }
+            for cmd in &rider_cmds {
+                if last_off != Some(cmd.offset_bytes) {
+                    rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                    last_off = Some(cmd.offset_bytes);
+                }
                 let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
                 rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
             }

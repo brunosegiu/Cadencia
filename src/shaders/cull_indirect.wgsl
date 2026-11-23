@@ -68,9 +68,11 @@ fn cs_build_indirect_commands(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sector_id = desc.flags & 127u;
     let cast_shadow = (desc.flags & 256u) != 0u;
     let is_sector_surface = (desc.flags & 512u) != 0u;
+    let raw_caster_cm = desc.flags >> 16u;
 
     let pos = desc.pos_radius.xyz;
     let world_r = desc.pos_radius.w;
+    let caster_r = select(world_r, f32(raw_caster_cm) * 0.01, raw_caster_cm > 0u);
 
     // 1. Scene G-Buffer Pass Indirect Command:
     //    - Sector must be registered visible by CPU Octree frustum traversal
@@ -92,15 +94,15 @@ fn cs_build_indirect_commands(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // 2. CSM Shadow Cascade Passes (passes 1..=3):
     //    - Sector must be registered visible by CPU Octree traversal
-    //    - Draw call bounding sphere must pass per-cascade bounding-radius size filter AND 6-plane GPU CSM Frustum test
+    //    - Draw call caster size must pass per-cascade bounding-radius size filter AND 6-plane GPU CSM Frustum test
     let shadows_on = cull.csm_min_caster_r.w > 0.5 &&
         cast_shadow &&
         is_sector_bit_set(cull.shadow_sector_mask, sector_id);
 
     // Cascade 0
     let vis_c0 = shadows_on &&
-        world_r >= cull.csm_min_caster_r.x &&
-        world_r <= cull.csm_max_caster_r.x &&
+        caster_r >= cull.csm_min_caster_r.x &&
+        caster_r <= cull.csm_max_caster_r.x &&
         frustum_contains_sphere(cull.csm0_frustum_planes, pos, world_r);
     indirect_cmds[stride + cmd_id] = DrawIndexedIndirectCmd(
         desc.index_count,
@@ -112,8 +114,8 @@ fn cs_build_indirect_commands(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Cascade 1
     let vis_c1 = shadows_on &&
-        world_r >= cull.csm_min_caster_r.y &&
-        world_r <= cull.csm_max_caster_r.y &&
+        caster_r >= cull.csm_min_caster_r.y &&
+        caster_r <= cull.csm_max_caster_r.y &&
         frustum_contains_sphere(cull.csm1_frustum_planes, pos, world_r);
     indirect_cmds[2u * stride + cmd_id] = DrawIndexedIndirectCmd(
         desc.index_count,
@@ -125,8 +127,8 @@ fn cs_build_indirect_commands(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Cascade 2
     let vis_c2 = shadows_on &&
-        world_r >= cull.csm_min_caster_r.z &&
-        world_r <= cull.csm_max_caster_r.z &&
+        caster_r >= cull.csm_min_caster_r.z &&
+        caster_r <= cull.csm_max_caster_r.z &&
         frustum_contains_sphere(cull.csm2_frustum_planes, pos, world_r);
     indirect_cmds[3u * stride + cmd_id] = DrawIndexedIndirectCmd(
         desc.index_count,
