@@ -390,6 +390,18 @@ mod tests {
 
         let sp = RouteSpline::for_biome(BiomeId::CoastalPromenade);
         let geo = crate::world::terrain::build_biome_world(BiomeId::CoastalPromenade, &sp);
-        assert_eq!(geo.sectors.len(), crate::world::terrain::NUM_WORLD_SECTORS);
+        assert!(geo.sectors.len() >= 16 && geo.sectors.len() <= crate::world::terrain::MAX_OCTREE_SECTORS);
+        assert!(geo.octree.nodes.len() > geo.sectors.len());
+
+        // Verify CPU octree frustum culling selects only the visible subset of leaf sectors
+        let hero_s = sp.sample(sp.hero_start_dist_m);
+        let cam_pos = hero_s.pos - hero_s.tangent * 4.5 + Vec3::Y * 2.0;
+        let cam_target = hero_s.pos + hero_s.tangent * 15.0 + Vec3::Y * 1.0;
+        let view = glam::Mat4::look_at_rh(cam_pos, cam_target, Vec3::Y);
+        let proj = glam::Mat4::perspective_rh(50.0_f32.to_radians(), 4.0 / 3.0, 0.25, 1900.0);
+        let frustum = crate::world::terrain::Frustum::from_view_proj(proj * view);
+        let mut vis = Vec::new();
+        geo.octree.query_frustum(&frustum, &mut vis);
+        assert!(!vis.is_empty() && vis.len() < geo.sectors.len());
     }
 }

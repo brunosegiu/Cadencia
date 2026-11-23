@@ -3,7 +3,64 @@ use glam::{Mat4, Vec3};
 use crate::assets::{ModelId, SceneVertex};
 use crate::world::{BiomeId, RouteSpline};
 
-pub const NUM_WORLD_SECTORS: usize = 16;
+pub const OCTREE_MAX_DEPTH: usize = 3;
+pub const MAX_OCTREE_SECTORS: usize = 120; // fits in 128-bit mask [u32; 4] with bit 127 reserved for dynamic riders
+
+/// 6-plane view/light frustum extracted via Gribb-Hartmann method.
+/// Each plane `[nx, ny, nz, d]` has inward-pointing unit normal `(nx, ny, nz)`
+/// such that a point `P` is inside when `dot(n, P) + d >= 0`.
+#[derive(Debug, Clone, Copy)]
+pub struct Frustum {
+    pub planes: [[f32; 4]; 6],
+}
+
+impl Frustum {
+    pub fn from_view_proj(vp: Mat4) -> Self {
+        let r0 = vp.row(0);
+        let r1 = vp.row(1);
+        let r2 = vp.row(2);
+        let r3 = vp.row(3);
+
+        let raw = [
+            r3 + r0, // Left
+            r3 - r0, // Right
+            r3 + r1, // Bottom
+            r3 - r1, // Top
+            r2,      // Near (wgpu 0..1 depth)
+            r3 - r2, // Far
+        ];
+
+        let mut planes = [[0.0_f32; 4]; 6];
+        for (i, p) in raw.iter().enumerate() {
+            let len = Vec3::new(p.x, p.y, p.z).length().max(1e-6);
+            planes[i] = [p.x / len, p.y / len, p.z / len, p.w / len];
+        }
+        Self { planes }
+    }
+
+    #[inline]
+    pub fn intersects_aabb(&self, aabb_min: Vec3, aabb_max: Vec3) -> bool {
+        for &[nx, ny, nz, d] in &self.planes {
+            let px = if nx >= 0.0 { aabb_max.x } else { aabb_min.x };
+            let py = if ny >= 0.0 { aabb_max.y } else { aabb_min.y };
+            let pz = if nz >= 0.0 { aabb_max.z } else { aabb_min.z };
+            if nx * px + ny * py + nz * pz + d < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    pub fn intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
+        for &[nx, ny, nz, d] in &self.planes {
+            if nx * center.x + ny * center.y + nz * center.z + d < -radius {
+                return false;
+            }
+        }
+        true
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PropInstance {
@@ -17,11 +74,12 @@ pub struct PropInstance {
     pub sector_id: u32,
 }
 
+/// A leaf chunk (sector) of the 3D `WorldOctree`.
 #[derive(Debug, Clone)]
 pub struct WorldSector {
     pub sector_id: u32,
-    pub start_dist_m: f32,
-    pub end_dist_m: f32,
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
     pub center: Vec3,
     pub bounding_radius: f32,
     pub road_index_offset: u32,
@@ -31,6 +89,75 @@ pub struct WorldSector {
     pub wire_index_offset: u32,
     pub wire_index_count: u32,
     pub prop_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OctreeNode {
+    pub aabb_min: Vec3,
+    pub aabb_max: Vec3,
+    pub children: [Option<usize>; 8],
+    pub leaf_sector_id: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorldOctree {
+    pub nodes: Vec<OctreeNode>,
+    pub root: usize,
+}
+
+impl WorldOctree {
+    /// Traverses the 3D octree top-down on the CPU using 6-plane AABB frustum culling
+    /// and registers every visible leaf sector (`WorldSector`) into `out_visible_sectors`.
+    pub fn query_frustum(&self, frustum: &Frustum, out_visible_sectors: &mut Vec<usize>) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        self.query_node(self.root, frustum, out_visible_sectors);
+    }
+
+    fn query_node(&self, node_idx: usize, frustum: &Frustum, out: &mut Vec<usize>) {
+        let node = &self.nodes[node_idx];
+        if !frustum.intersects_aabb(node.aabb_min, node.aabb_max) {
+            return;
+        }
+        if let Some(sec_id) = node.leaf_sector_id {
+            out.push(sec_id as usize);
+            return;
+        }
+        for &child in &node.children {
+            if let Some(c_idx) = child {
+                self.query_node(c_idx, frustum, out);
+            }
+        }
+    }
+
+    /// Finds the leaf `sector_id` containing 3D point `pos`.
+    pub fn find_leaf_sector(&self, pos: Vec3) -> u32 {
+        if self.nodes.is_empty() {
+            return 0;
+        }
+        let mut cur = self.root;
+        loop {
+            let node = &self.nodes[cur];
+            if let Some(sec_id) = node.leaf_sector_id {
+                return sec_id;
+            }
+            let mid = 0.5 * (node.aabb_min + node.aabb_max);
+            let oct = ((pos.x >= mid.x) as usize)
+                | (((pos.y >= mid.y) as usize) << 1)
+                | (((pos.z >= mid.z) as usize) << 2);
+            if let Some(c_idx) = node.children[oct] {
+                cur = c_idx;
+            } else {
+                // Fallback to first available non-empty child
+                if let Some(c_idx) = node.children.iter().flatten().copied().next() {
+                    cur = c_idx;
+                } else {
+                    return 0;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,60 +172,129 @@ pub struct StaticWorldGeometry {
     pub water_indices: Vec<u32>,
     pub props: Vec<PropInstance>,
     pub sectors: Vec<WorldSector>,
+    pub octree: WorldOctree,
     pub hero_sun_dir: Vec3,
 }
 
-pub fn sector_for_pos(spline: &RouteSpline, pos: Vec3) -> usize {
-    let n = spline.samples.len();
-    if n == 0 {
-        return 0;
+fn build_recursive_octree_node(
+    nodes: &mut Vec<OctreeNode>,
+    aabb_min: Vec3,
+    aabb_max: Vec3,
+    depth: usize,
+    sample_points: &[Vec3],
+    pt_indices: &[usize],
+    next_sector_id: &mut u32,
+    sector_aabbs: &mut Vec<(Vec3, Vec3)>,
+) -> usize {
+    let node_idx = nodes.len();
+    nodes.push(OctreeNode {
+        aabb_min,
+        aabb_max,
+        children: [None; 8],
+        leaf_sector_id: None,
+    });
+
+    if depth >= OCTREE_MAX_DEPTH || (*next_sector_id as usize) + 8 > MAX_OCTREE_SECTORS {
+        let sid = *next_sector_id;
+        *next_sector_id += 1;
+        nodes[node_idx].leaf_sector_id = Some(sid);
+        sector_aabbs.push((aabb_min, aabb_max));
+        return node_idx;
     }
-    let step = 16usize.min(n).max(1);
-    let mut best_idx = 0usize;
-    let mut best_d2 = f32::MAX;
-    let mut i = 0usize;
-    while i < n {
-        let p = spline.samples[i].pos;
-        let dx = pos.x - p.x;
-        let dz = pos.z - p.z;
-        let d2 = dx * dx + dz * dz;
-        if d2 < best_d2 {
-            best_d2 = d2;
-            best_idx = i;
+
+    let mid = 0.5 * (aabb_min + aabb_max);
+    let mut oct_pts: [Vec<usize>; 8] = std::array::from_fn(|_| Vec::new());
+    for &pi in pt_indices {
+        let p = sample_points[pi];
+        let oct = ((p.x >= mid.x) as usize)
+            | (((p.y >= mid.y) as usize) << 1)
+            | (((p.z >= mid.z) as usize) << 2);
+        oct_pts[oct].push(pi);
+    }
+
+    let non_empty_count = oct_pts.iter().filter(|v| !v.is_empty()).count();
+    if non_empty_count == 0 {
+        let sid = *next_sector_id;
+        *next_sector_id += 1;
+        nodes[node_idx].leaf_sector_id = Some(sid);
+        sector_aabbs.push((aabb_min, aabb_max));
+        return node_idx;
+    }
+
+    let mut children = [None; 8];
+    for oct in 0..8 {
+        if oct_pts[oct].is_empty() {
+            continue;
         }
-        i += step;
+        let c_min = Vec3::new(
+            if (oct & 1) != 0 { mid.x } else { aabb_min.x },
+            if (oct & 2) != 0 { mid.y } else { aabb_min.y },
+            if (oct & 4) != 0 { mid.z } else { aabb_min.z },
+        );
+        let c_max = Vec3::new(
+            if (oct & 1) != 0 { aabb_max.x } else { mid.x },
+            if (oct & 2) != 0 { aabb_max.y } else { mid.y },
+            if (oct & 4) != 0 { aabb_max.z } else { mid.z },
+        );
+        let child_idx = build_recursive_octree_node(
+            nodes,
+            c_min,
+            c_max,
+            depth + 1,
+            sample_points,
+            &oct_pts[oct],
+            next_sector_id,
+            sector_aabbs,
+        );
+        children[oct] = Some(child_idx);
     }
-    let base = best_idx;
-    for off in -(step as isize)..=(step as isize) {
-        let idx = (base as isize + off).rem_euclid(n as isize) as usize;
-        let p = spline.samples[idx].pos;
-        let dx = pos.x - p.x;
-        let dz = pos.z - p.z;
-        let d2 = dx * dx + dz * dz;
-        if d2 < best_d2 {
-            best_d2 = d2;
-            best_idx = idx;
-        }
-    }
-    ((best_idx * NUM_WORLD_SECTORS) / n).min(NUM_WORLD_SECTORS - 1)
+    nodes[node_idx].children = children;
+    node_idx
 }
 
-fn partition_indices_by_sector(
-    spline: &RouteSpline,
+fn tighten_octree_bounds(nodes: &mut [OctreeNode], node_idx: usize, sectors: &[WorldSector]) -> (Vec3, Vec3) {
+    if let Some(sid) = nodes[node_idx].leaf_sector_id {
+        let sec = &sectors[sid as usize];
+        nodes[node_idx].aabb_min = sec.aabb_min;
+        nodes[node_idx].aabb_max = sec.aabb_max;
+        return (sec.aabb_min, sec.aabb_max);
+    }
+    let children = nodes[node_idx].children;
+    let mut b_min = Vec3::splat(f32::MAX);
+    let mut b_max = Vec3::splat(f32::MIN);
+    for c_idx in children.into_iter().flatten() {
+        let (c_min, c_max) = tighten_octree_bounds(nodes, c_idx, sectors);
+        b_min = b_min.min(c_min);
+        b_max = b_max.max(c_max);
+    }
+    if b_min.x <= b_max.x {
+        nodes[node_idx].aabb_min = b_min;
+        nodes[node_idx].aabb_max = b_max;
+    }
+    (nodes[node_idx].aabb_min, nodes[node_idx].aabb_max)
+}
+
+fn partition_indices_by_octree(
+    octree: &WorldOctree,
+    num_sectors: usize,
     verts: &[SceneVertex],
     indices: &mut Vec<u32>,
-) -> [(u32, u32); NUM_WORLD_SECTORS] {
-    let mut buckets: [Vec<u32>; NUM_WORLD_SECTORS] = std::array::from_fn(|_| Vec::new());
+    sector_tight_bounds: &mut [(Vec3, Vec3)],
+) -> Vec<(u32, u32)> {
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); num_sectors];
     for tri in indices.chunks_exact(3) {
         let p0 = Vec3::from(verts[tri[0] as usize].pos);
         let p1 = Vec3::from(verts[tri[1] as usize].pos);
         let p2 = Vec3::from(verts[tri[2] as usize].pos);
         let centroid = (p0 + p1 + p2) * (1.0 / 3.0);
-        let sec = sector_for_pos(spline, centroid);
+        let sec = (octree.find_leaf_sector(centroid) as usize).min(num_sectors - 1);
         buckets[sec].extend_from_slice(tri);
+        let b = &mut sector_tight_bounds[sec];
+        b.0 = b.0.min(p0).min(p1).min(p2);
+        b.1 = b.1.max(p0).max(p1).max(p2);
     }
     indices.clear();
-    let mut ranges = [(0u32, 0u32); NUM_WORLD_SECTORS];
+    let mut ranges = vec![(0u32, 0u32); num_sectors];
     for (sec, b) in buckets.into_iter().enumerate() {
         let start = indices.len() as u32;
         let count = b.len() as u32;
@@ -582,7 +778,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         let xform = Mat4::from_translation(pos)
             * Mat4::from_rotation_y(yaw)
             * Mat4::from_scale(scale);
-        let sector_id = sector_for_pos(spline, pos) as u32;
         props.push(PropInstance {
             model,
             transform: xform,
@@ -591,7 +786,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
             outline_weight: outline_w,
             crease_sensitivity: crease,
             cast_shadow: shadow,
-            sector_id,
+            sector_id: 0,
         });
     };
 
@@ -985,34 +1180,109 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         }
     }
 
-    // 6. Partition Road, Terrain, Wires, and Props into NUM_WORLD_SECTORS spatial sectors
-    let road_ranges = partition_indices_by_sector(spline, &road_vertices, &mut road_indices);
-    let terrain_ranges = partition_indices_by_sector(spline, &terrain_vertices, &mut terrain_indices);
-    let wire_ranges = partition_indices_by_sector(spline, &wire_vertices, &mut wire_indices);
+    // 6. Build 3D WorldOctree and assign Road, Terrain, Wires, and Props to Octree Leaf Sectors (Chunks)
+    let mut sample_points = Vec::with_capacity(
+        road_indices.len() / 3 + terrain_indices.len() / 3 + wire_indices.len() / 3 + props.len(),
+    );
+    let mut world_min = Vec3::splat(f32::MAX);
+    let mut world_max = Vec3::splat(f32::MIN);
 
-    let sector_len_m = spline.total_length_m / NUM_WORLD_SECTORS as f32;
-    let mut sectors = Vec::with_capacity(NUM_WORLD_SECTORS);
-    for sec_i in 0..NUM_WORLD_SECTORS {
-        let start_dist_m = sec_i as f32 * sector_len_m;
-        let end_dist_m = (sec_i + 1) as f32 * sector_len_m;
-        let mid_s = spline.sample(start_dist_m + 0.5 * sector_len_m);
-        let s0 = spline.sample(start_dist_m);
-        let s1 = spline.sample(end_dist_m);
-        let mut prop_indices = Vec::new();
-        let mut max_r2 = (s0.pos.distance_squared(mid_s.pos)).max(s1.pos.distance_squared(mid_s.pos));
-        for (pi, p) in props.iter().enumerate() {
-            if p.sector_id == sec_i as u32 {
-                prop_indices.push(pi);
-                let p_pos = p.transform.w_axis.truncate();
-                max_r2 = max_r2.max(p_pos.distance_squared(mid_s.pos));
-            }
+    for (verts, idxs) in [
+        (&road_vertices, &road_indices),
+        (&terrain_vertices, &terrain_indices),
+        (&wire_vertices, &wire_indices),
+    ] {
+        for tri in idxs.chunks_exact(3) {
+            let p0 = Vec3::from(verts[tri[0] as usize].pos);
+            let p1 = Vec3::from(verts[tri[1] as usize].pos);
+            let p2 = Vec3::from(verts[tri[2] as usize].pos);
+            world_min = world_min.min(p0).min(p1).min(p2);
+            world_max = world_max.max(p0).max(p1).max(p2);
+            sample_points.push((p0 + p1 + p2) * (1.0 / 3.0));
         }
-        let bounding_radius = (max_r2.sqrt() + 45.0).max(sector_len_m * 0.85);
+    }
+    for p in &props {
+        let pos = p.transform.w_axis.truncate();
+        world_min = world_min.min(pos - Vec3::splat(16.0));
+        world_max = world_max.max(pos + Vec3::splat(16.0));
+        sample_points.push(pos);
+    }
+    world_min -= Vec3::splat(2.0);
+    world_max += Vec3::splat(2.0);
+
+    let all_pt_indices: Vec<usize> = (0..sample_points.len()).collect();
+    let mut octree_nodes = Vec::new();
+    let mut next_sector_id = 0u32;
+    let mut sector_cell_aabbs = Vec::new();
+    let root = build_recursive_octree_node(
+        &mut octree_nodes,
+        world_min,
+        world_max,
+        0,
+        &sample_points,
+        &all_pt_indices,
+        &mut next_sector_id,
+        &mut sector_cell_aabbs,
+    );
+    let mut octree = WorldOctree {
+        nodes: octree_nodes,
+        root,
+    };
+    let num_sectors = (next_sector_id as usize).max(1);
+
+    let mut sector_tight_bounds: Vec<(Vec3, Vec3)> =
+        vec![(Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)); num_sectors];
+
+    let road_ranges = partition_indices_by_octree(
+        &octree,
+        num_sectors,
+        &road_vertices,
+        &mut road_indices,
+        &mut sector_tight_bounds,
+    );
+    let terrain_ranges = partition_indices_by_octree(
+        &octree,
+        num_sectors,
+        &terrain_vertices,
+        &mut terrain_indices,
+        &mut sector_tight_bounds,
+    );
+    let wire_ranges = partition_indices_by_octree(
+        &octree,
+        num_sectors,
+        &wire_vertices,
+        &mut wire_indices,
+        &mut sector_tight_bounds,
+    );
+
+    let mut sector_props: Vec<Vec<usize>> = vec![Vec::new(); num_sectors];
+    for (pi, p) in props.iter_mut().enumerate() {
+        let pos = p.transform.w_axis.truncate();
+        let sid = (octree.find_leaf_sector(pos) as usize).min(num_sectors - 1);
+        p.sector_id = sid as u32;
+        sector_props[sid].push(pi);
+        let pad = Vec3::splat(16.0);
+        sector_tight_bounds[sid].0 = sector_tight_bounds[sid].0.min(pos - pad);
+        sector_tight_bounds[sid].1 = sector_tight_bounds[sid].1.max(pos + pad);
+    }
+
+    let mut sectors = Vec::with_capacity(num_sectors);
+    for sec_i in 0..num_sectors {
+        let (mut b_min, mut b_max) = sector_tight_bounds[sec_i];
+        if b_min.x > b_max.x {
+            b_min = sector_cell_aabbs[sec_i].0;
+            b_max = sector_cell_aabbs[sec_i].1;
+        } else {
+            b_min -= Vec3::splat(1.0);
+            b_max += Vec3::splat(1.0);
+        }
+        let center = 0.5 * (b_min + b_max);
+        let bounding_radius = (0.5 * (b_max - b_min)).length().max(2.0);
         sectors.push(WorldSector {
             sector_id: sec_i as u32,
-            start_dist_m,
-            end_dist_m,
-            center: mid_s.pos,
+            aabb_min: b_min,
+            aabb_max: b_max,
+            center,
             bounding_radius,
             road_index_offset: road_ranges[sec_i].0,
             road_index_count: road_ranges[sec_i].1,
@@ -1020,9 +1290,12 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
             terrain_index_count: terrain_ranges[sec_i].1,
             wire_index_offset: wire_ranges[sec_i].0,
             wire_index_count: wire_ranges[sec_i].1,
-            prop_indices,
+            prop_indices: std::mem::take(&mut sector_props[sec_i]),
         });
     }
+
+    // Tighten internal octree node AABBs bottom-up to match their leaf sectors
+    tighten_octree_bounds(&mut octree.nodes, root, &sectors);
 
     let hero = spline.sample(spline.hero_start_dist_m);
     let hero_sun_dir = match biome {
@@ -1042,6 +1315,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         water_indices,
         props,
         sectors,
+        octree,
         hero_sun_dir,
     }
 }

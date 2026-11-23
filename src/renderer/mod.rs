@@ -9,7 +9,7 @@ use crate::assets::{AssetBank, MaterialRole, ModelId, SceneVertex};
 use crate::world::riders::{
     build_rider_draw_parts, AiRider, RiderPartDraw, RiderPoseMode, RiderProfile,
 };
-use crate::world::terrain::StaticWorldGeometry;
+use crate::world::terrain::{Frustum, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
@@ -133,12 +133,15 @@ pub struct SkinJob {
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SectorCullUniforms {
     pub camera_pos_max_dist: [f32; 4],
-    pub csm_center_r0: [f32; 4],
-    pub csm_center_r1: [f32; 4],
-    pub csm_center_r2: [f32; 4],
+    pub cam_frustum_planes: [[f32; 4]; 6],
+    pub csm0_frustum_planes: [[f32; 4]; 6],
+    pub csm1_frustum_planes: [[f32; 4]; 6],
+    pub csm2_frustum_planes: [[f32; 4]; 6],
     pub csm_min_caster_r: [f32; 4],
     pub csm_max_caster_r: [f32; 4],
-    pub active_sector_info: [u32; 4], // [active_sector_bitmask, command_count, pass_stride, 0]
+    pub cam_sector_mask: [u32; 4],
+    pub shadow_sector_mask: [u32; 4],
+    pub cmd_info: [u32; 4], // [command_count, pass_stride, 0, 0]
 }
 
 #[repr(C)]
@@ -1505,25 +1508,56 @@ impl LigneClaireRenderer {
         }
 
         // -----------------------------------------------------------------
-        // CPU SECTOR STREAMING & ENQUEUEING TO GPU
+        // CPU OCTREE FRUSTUM TRAVERSAL & SECTOR ENQUEUEING TO GPU
         // -----------------------------------------------------------------
         let max_prop_dist = graphics.prop_draw_distance_m.clamp(150.0, 1200.0);
-        let mut active_sector_bitmask: u32 = 1u32 << 31; // Bit 31 reserved for active cyclists
+        let cam_frustum = Frustum::from_view_proj(view_proj);
+        let csm_frustums: [Frustum; NUM_SHADOW_CASCADES] =
+            std::array::from_fn(|ci| Frustum::from_view_proj(cascade_vp[ci]));
+
+        let set_sector_bit = |mask: &mut [u32; 4], sid: usize| {
+            let sid = sid.min(127);
+            mask[sid >> 5] |= 1u32 << (sid & 31);
+        };
+        let is_sector_bit = |mask: &[u32; 4], sid: usize| -> bool {
+            let sid = sid.min(127);
+            ((mask[sid >> 5] >> (sid & 31)) & 1u32) != 0
+        };
+
+        // Bit 127 reserved for dynamic cyclists
+        let mut cam_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
+        let mut shadow_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
+        let mut union_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
         let mut active_sector_ids: Vec<usize> = Vec::with_capacity(geo.sectors.len());
-        for sec in &geo.sectors {
-            let to_sec = sec.center - cam_pos;
-            let dist = to_sec.length();
-            let in_front = to_sec.dot(view_fwd) >= -(sec.bounding_radius + 45.0);
-            if dist <= (max_prop_dist * 0.65 + sec.bounding_radius) && (in_front || dist <= sec.bounding_radius + 65.0) {
-                let sid = (sec.sector_id as usize).min(30);
-                active_sector_bitmask |= 1u32 << sid;
-                active_sector_ids.push(sid);
+
+        // 1. Traverse 3D WorldOctree against Camera View Frustum on CPU
+        let mut cam_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
+        geo.octree.query_frustum(&cam_frustum, &mut cam_vis_sectors);
+        for sid in cam_vis_sectors {
+            if sid < geo.sectors.len() {
+                set_sector_bit(&mut cam_sector_mask, sid);
+                if !is_sector_bit(&union_sector_mask, sid) {
+                    set_sector_bit(&mut union_sector_mask, sid);
+                    active_sector_ids.push(sid);
+                }
             }
         }
-        if active_sector_ids.is_empty() {
-            for (sid, _) in geo.sectors.iter().enumerate() {
-                active_sector_bitmask |= 1u32 << sid;
-                active_sector_ids.push(sid);
+
+        // 2. Traverse 3D WorldOctree against CSM Shadow Frustums on CPU
+        if graphics.shadows_enabled {
+            let mut csm_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
+            for csm_f in &csm_frustums {
+                csm_vis_sectors.clear();
+                geo.octree.query_frustum(csm_f, &mut csm_vis_sectors);
+                for &sid in &csm_vis_sectors {
+                    if sid < geo.sectors.len() {
+                        set_sector_bit(&mut shadow_sector_mask, sid);
+                        if !is_sector_bit(&union_sector_mask, sid) {
+                            set_sector_bit(&mut union_sector_mask, sid);
+                            active_sector_ids.push(sid);
+                        }
+                    }
+                }
             }
         }
 
@@ -1763,7 +1797,7 @@ impl LigneClaireRenderer {
                     index_count: ms.index_count,
                     first_index: ms.first_index,
                     base_vertex: eff_base_vertex,
-                    flags: 31u32 | 256u32, // sector 31 (dynamic rider), cast_shadow = true
+                    flags: 127u32 | 256u32, // sector 127 (dynamic rider), cast_shadow = true
                 });
                 enqueued_cmds.push(EnqueuedCommandRef {
                     cmd_slot: slot,
@@ -1793,24 +1827,10 @@ impl LigneClaireRenderer {
         let cmd_count = draw_descs.len() as u32;
         let cull_u = SectorCullUniforms {
             camera_pos_max_dist: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
-            csm_center_r0: [
-                csm_centers[0].x,
-                csm_centers[0].y,
-                csm_centers[0].z,
-                csm_ortho_radii[0] * 1.18,
-            ],
-            csm_center_r1: [
-                csm_centers[1].x,
-                csm_centers[1].y,
-                csm_centers[1].z,
-                csm_ortho_radii[1] * 1.18,
-            ],
-            csm_center_r2: [
-                csm_centers[2].x,
-                csm_centers[2].y,
-                csm_centers[2].z,
-                csm_ortho_radii[2] * 1.18,
-            ],
+            cam_frustum_planes: cam_frustum.planes,
+            csm0_frustum_planes: csm_frustums[0].planes,
+            csm1_frustum_planes: csm_frustums[1].planes,
+            csm2_frustum_planes: csm_frustums[2].planes,
             csm_min_caster_r: [
                 csm_min_caster_r[0],
                 csm_min_caster_r[1],
@@ -1818,10 +1838,12 @@ impl LigneClaireRenderer {
                 if graphics.shadows_enabled { 1.0 } else { 0.0 },
             ],
             csm_max_caster_r: [csm_max_caster_r[0], csm_max_caster_r[1], csm_max_caster_r[2], 0.0],
-            active_sector_info: [
-                active_sector_bitmask,
+            cam_sector_mask,
+            shadow_sector_mask,
+            cmd_info: [
                 cmd_count,
                 MAX_INDIRECT_COMMANDS as u32,
+                0,
                 0,
             ],
         };
