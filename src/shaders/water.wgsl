@@ -30,10 +30,9 @@ struct ObjectUniforms {
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
-    @location(1) normal: vec3<f32>,
+    @location(1) normal_mat: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
-    @location(4) material_type: u32,
 };
 
 struct WaterOut {
@@ -45,10 +44,19 @@ struct WaterOut {
 };
 
 struct GBufferOut {
-    @location(0) lit_color: vec4<f32>,
-    @location(1) normal_id: vec4<f32>,
-    @location(2) depth_meta: vec4<f32>,
+    @location(0) lit_color: vec4<f32>, // rgb = lit color, a = outline_weight
+    @location(1) normal_id: vec4<f32>, // rg = octahedral view normal, b = crease_sensitivity, a = object_id
 };
+
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z) + 1e-5));
+    let res = select(
+        (1.0 - abs(p.yx)) * vec2<f32>(select(-1.0, 1.0, p.x >= 0.0), select(-1.0, 1.0, p.y >= 0.0)),
+        p,
+        n.z >= 0.0
+    );
+    return res * 0.5 + 0.5;
+}
 
 @vertex
 fn vs_water(in: VertexInput) -> WaterOut {
@@ -68,7 +76,6 @@ fn fs_water(in: WaterOut) -> GBufferOut {
     let V = normalize(frame.camera_pos.xyz - in.world_pos);
     let L = normalize(frame.sun_dir.xyz);
     let t = frame.camera_pos.w;
-    let biome_id = frame.fog_color.w; // packed? Wait: fog_color.w is fog_density! Let's check sun_dir.w (disc_strength) -> >0 means Coastal Ocean!
 
     var col = in.color.rgb;
     if (frame.sun_dir.w > 0.5) {
@@ -81,16 +88,13 @@ fn fs_water(in: WaterOut) -> GBufferOut {
         let ripple2 = cos(in.world_pos.x * 0.55 - in.world_pos.z * 0.4 + t * 0.7);
         let wave = ripple1 * 0.5 + ripple2 * 0.5;
 
-        // Warm horizon water blend
         let far_t = smoothstep(50.0, 620.0, in.view_depth);
         col = mix(vec3<f32>(0.37, 0.50, 0.60), vec3<f32>(0.76, 0.68, 0.58), far_t * 0.65);
 
-        // Sparkling sunset path across water
         let sun_path = pow(align, 11.0);
         let glitter = smoothstep(0.10, 0.75, sun_path + wave * 0.32 * sun_path);
         col = mix(col, vec3<f32>(1.00, 0.93, 0.70), clamp(glitter * 0.96, 0.0, 1.0));
 
-        // Subtle delicate horizontal comic water streaks
         let streak = smoothstep(0.88, 0.98, sin(in.world_pos.z * 1.4 + sin(in.world_pos.x * 0.2) * 2.0 + t * 0.5));
         col = mix(col, vec3<f32>(0.92, 0.86, 0.74), streak * 0.28 * (1.0 - far_t * 0.55));
     } else {
@@ -99,21 +103,15 @@ fn fs_water(in: WaterOut) -> GBufferOut {
         col = mix(vec3<f32>(0.84, 0.88, 0.86), vec3<f32>(0.97, 0.96, 0.92), ripple * 0.65);
     }
 
-    let _unused = biome_id;
     let fog_dist = max(in.view_depth - 45.0, 0.0);
     let fog_factor = 1.0 - exp(-fog_dist * frame.fog_color.w * 0.75);
     col = mix(col, frame.fog_color.rgb, clamp(fog_factor, 0.0, 0.72));
 
-    let norm_d = clamp(in.view_depth / frame.sky_zenith.w, 0.0, 0.9999);
-    let d_scaled = norm_d * 255.0;
-    let d_hi = floor(d_scaled) / 255.0;
-    let d_lo = fract(d_scaled);
-
     var out: GBufferOut;
-    out.lit_color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    // Flat upward normal, outline_weight = 0.0 on water interior so shore edges get inked by terrain border
+    // outline_weight = 0.0 in alpha on water interior so shore edges get inked by terrain border
+    out.lit_color = vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0);
     let vn = normalize((frame.view_mat * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
-    out.normal_id = vec4<f32>(vn * 0.5 + 0.5, obj.obj_info.x);
-    out.depth_meta = vec4<f32>(d_hi, d_lo, 0.0, 0.0);
+    let oct_n = oct_encode(vn);
+    out.normal_id = vec4<f32>(oct_n.x, oct_n.y, 0.0, obj.obj_info.x);
     return out;
 }

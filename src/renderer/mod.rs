@@ -14,6 +14,9 @@ use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
+pub const MAX_SKINNED_VERTS: usize = 65536;
+pub const MAX_SKIN_JOBS: usize = 64;
+pub const MAX_INDIRECT_COMMANDS: usize = 16384;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GraphicsSettings {
@@ -106,10 +109,65 @@ pub struct ObjectUniforms {
     pub skin_pose_l: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SkinDispatchParams {
+    pub job_count: u32,
+    pub max_verts_per_job: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SkinJob {
+    pub skin_pose_r: [f32; 4],
+    pub skin_pose_l: [f32; 4],
+    pub src_offset: u32,
+    pub dst_offset: u32,
+    pub vertex_count: u32,
+    pub _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SectorCullUniforms {
+    pub camera_pos_max_dist: [f32; 4],
+    pub csm_center_r0: [f32; 4],
+    pub csm_center_r1: [f32; 4],
+    pub csm_center_r2: [f32; 4],
+    pub csm_min_caster_r: [f32; 4],
+    pub csm_max_caster_r: [f32; 4],
+    pub active_sector_info: [u32; 4], // [active_sector_bitmask, command_count, pass_stride, 0]
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct GpuDrawDesc {
+    pub pos_radius: [f32; 4],
+    pub index_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
+    pub flags: u32, // bits 0..4: sector_id (0..15 or 31 for riders), bit 8: cast_shadow, bit 9: is_sector_surface
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct DrawIndexedIndirectCmd {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub base_vertex: i32,
+    pub first_instance: u32,
+}
+
+#[derive(Clone, Copy)]
 struct GpuMeshSection {
-    vertex_buf: wgpu::Buffer,
-    index_buf: wgpu::Buffer,
+    base_vertex: i32,
+    first_index: u32,
     index_count: u32,
+    vertex_count: u32,
+    skin_src_offset: u32,
     role: MaterialRole,
     #[allow(dead_code)]
     base_color: [f32; 4],
@@ -120,11 +178,17 @@ struct GpuModel {
     bounding_radius: f32,
 }
 
-struct GpuWorldBuffers {
-    road: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    terrain: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    wire: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
-    water: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
+struct GpuWorldOffsets {
+    road_base_vertex: i32,
+    road_first_index: u32,
+    terrain_base_vertex: i32,
+    terrain_first_index: u32,
+    wire_base_vertex: i32,
+    wire_first_index: u32,
+    water_base_vertex: i32,
+    water_first_index: u32,
+    water_index_count: u32,
+    skinned_base_vertex: u32,
 }
 
 struct GBufferTargets {
@@ -134,25 +198,43 @@ struct GBufferTargets {
     lit_view: wgpu::TextureView,
     normal_tex: wgpu::Texture,
     normal_view: wgpu::TextureView,
-    depth_meta_tex: wgpu::Texture,
-    depth_meta_view: wgpu::TextureView,
     scene_depth_tex: wgpu::Texture,
     scene_depth_view: wgpu::TextureView,
     post_bind_group: wgpu::BindGroup,
 }
 
-#[derive(Clone)]
-struct DrawItem {
+#[derive(Clone, Copy)]
+struct EnqueuedCommandRef {
+    cmd_slot: usize,
     offset_bytes: u32,
-    model_id: Option<ModelId>,
-    section_idx: usize,
-    world_kind: u8, // 0=model, 1=road, 2=terrain, 3=wire, 4=water
+    shadow_candidate: bool,
 }
 
 pub struct LigneClaireRenderer {
     pub output_format: wgpu::TextureFormat,
     models: HashMap<ModelId, GpuModel>,
-    world_bufs: GpuWorldBuffers,
+    static_model_verts: Vec<SceneVertex>,
+    static_model_indices: Vec<u32>,
+
+    mega_vb: wgpu::Buffer,
+    mega_ib: wgpu::Buffer,
+    world_offsets: GpuWorldOffsets,
+
+    // Pre-render Compute Skinning resources
+    skin_src_vb: wgpu::Buffer,
+    skin_params_buf: wgpu::Buffer,
+    skin_jobs_buf: wgpu::Buffer,
+    skin_bgl: wgpu::BindGroupLayout,
+    skin_bg: wgpu::BindGroup,
+    skin_pipeline: wgpu::ComputePipeline,
+
+    // Sector Queue & GPU Indirect Command Generation resources
+    cull_uniform_buf: wgpu::Buffer,
+    draw_desc_buf: wgpu::Buffer,
+    indirect_buf: wgpu::Buffer,
+    cull_bgl: wgpu::BindGroupLayout,
+    cull_bg: wgpu::BindGroup,
+    cull_pipeline: wgpu::ComputePipeline,
 
     frame_buf: wgpu::Buffer,
     shadow_frame_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
@@ -189,28 +271,6 @@ pub struct LigneClaireRenderer {
     pub egui_renderer: egui_wgpu::Renderer,
 }
 
-fn upload_mesh(
-    device: &wgpu::Device,
-    label: &str,
-    verts: &[SceneVertex],
-    indices: &[u32],
-) -> Option<(wgpu::Buffer, wgpu::Buffer, u32)> {
-    if verts.is_empty() || indices.is_empty() {
-        return None;
-    }
-    let vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{label}_vb")),
-        contents: bytemuck::cast_slice(verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(&format!("{label}_ib")),
-        contents: bytemuck::cast_slice(indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    Some((vb, ib, indices.len() as u32))
-}
-
 impl LigneClaireRenderer {
     pub fn new(
         device: &wgpu::Device,
@@ -223,23 +283,33 @@ impl LigneClaireRenderer {
         let height = height.max(1);
 
         let mut models = HashMap::new();
+        let mut static_model_verts: Vec<SceneVertex> = Vec::new();
+        let mut static_model_indices: Vec<u32> = Vec::new();
+
         for (&id, model) in &assets.models {
             let mut gpu_secs = Vec::new();
-            for (si, sec) in model.sections.iter().enumerate() {
-                if let Some((vb, ib, count)) = upload_mesh(
-                    device,
-                    &format!("{id:?}_{si}"),
-                    &sec.vertices,
-                    &sec.indices,
-                ) {
-                    gpu_secs.push(GpuMeshSection {
-                        vertex_buf: vb,
-                        index_buf: ib,
-                        index_count: count,
-                        role: sec.role,
-                        base_color: sec.base_color,
-                    });
+            for sec in &model.sections {
+                if sec.vertices.is_empty() || sec.indices.is_empty() {
+                    continue;
                 }
+                let base_vertex = static_model_verts.len() as i32;
+                let skin_src_offset = static_model_verts.len() as u32;
+                let vertex_count = sec.vertices.len() as u32;
+                let first_index = static_model_indices.len() as u32;
+                let index_count = sec.indices.len() as u32;
+
+                static_model_verts.extend_from_slice(&sec.vertices);
+                static_model_indices.extend_from_slice(&sec.indices);
+
+                gpu_secs.push(GpuMeshSection {
+                    base_vertex,
+                    first_index,
+                    index_count,
+                    vertex_count,
+                    skin_src_offset,
+                    role: sec.role,
+                    base_color: sec.base_color,
+                });
             }
             models.insert(
                 id,
@@ -249,6 +319,232 @@ impl LigneClaireRenderer {
                 },
             );
         }
+
+        let skin_src_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("skin_src_vb"),
+            contents: bytemuck::cast_slice(&static_model_verts),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let initial_skinned_base = static_model_verts.len() as u32;
+        let mut initial_vb_data = static_model_verts.clone();
+        initial_vb_data.resize(static_model_verts.len() + MAX_SKINNED_VERTS, SceneVertex::zeroed());
+
+        let mega_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mega_vb"),
+            contents: bytemuck::cast_slice(&initial_vb_data),
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        let mega_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mega_ib"),
+            contents: bytemuck::cast_slice(&static_model_indices),
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let world_offsets = GpuWorldOffsets {
+            road_base_vertex: 0,
+            road_first_index: 0,
+            terrain_base_vertex: 0,
+            terrain_first_index: 0,
+            wire_base_vertex: 0,
+            wire_first_index: 0,
+            water_base_vertex: 0,
+            water_first_index: 0,
+            water_index_count: 0,
+            skinned_base_vertex: initial_skinned_base,
+        };
+
+        // Pre-render Compute Skinning pipeline
+        let skin_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skin_params_buf"),
+            size: std::mem::size_of::<SkinDispatchParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let skin_jobs_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skin_jobs_buf"),
+            size: (std::mem::size_of::<SkinJob>() * MAX_SKIN_JOBS) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let skin_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skin_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SkinDispatchParams>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<SkinJob>() as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SceneVertex>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SceneVertex>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let skin_bg = Self::make_skin_bg(
+            device,
+            &skin_bgl,
+            &skin_params_buf,
+            &skin_jobs_buf,
+            &skin_src_vb,
+            &mega_vb,
+        );
+        let skin_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skinning_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/skinning.wgsl").into()),
+        });
+        let skin_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skin_pl"),
+            bind_group_layouts: &[Some(&skin_bgl)],
+            immediate_size: 0,
+        });
+        let skin_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("skin_pipeline"),
+            layout: Some(&skin_pl),
+            module: &skin_mod,
+            entry_point: Some("cs_skin_vertices"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Sector Queue & GPU Indirect Command Generation compute pipeline
+        let cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cull_uniform_buf"),
+            size: std::mem::size_of::<SectorCullUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let draw_desc_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("draw_desc_buf"),
+            size: (std::mem::size_of::<GpuDrawDesc>() * MAX_INDIRECT_COMMANDS) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // 4 passes of indirect draw commands: [0: Scene G-Buffer, 1: CSM C0, 2: CSM C1, 3: CSM C2]
+        let indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("indirect_draw_buf"),
+            size: (std::mem::size_of::<DrawIndexedIndirectCmd>() * MAX_INDIRECT_COMMANDS * 4)
+                as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cull_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SectorCullUniforms>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<GpuDrawDesc>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<DrawIndexedIndirectCmd>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cull_bg"),
+            layout: &cull_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cull_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: draw_desc_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: indirect_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let cull_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cull_indirect_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/cull_indirect.wgsl").into()),
+        });
+        let cull_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("cull_pl"),
+            bind_group_layouts: &[Some(&cull_bgl)],
+            immediate_size: 0,
+        });
+        let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("cull_indirect_pipeline"),
+            layout: Some(&cull_pl),
+            module: &cull_mod,
+            entry_point: Some("cs_build_indirect_commands"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let frame_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("frame_uniforms"),
@@ -266,7 +562,7 @@ impl LigneClaireRenderer {
         });
 
         let obj_align = device.limits().min_uniform_buffer_offset_alignment.max(256) as usize;
-        let obj_capacity = 4096usize;
+        let obj_capacity = MAX_INDIRECT_COMMANDS;
         let obj_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("object_uniforms"),
             size: (obj_align * obj_capacity) as u64,
@@ -347,7 +643,9 @@ impl LigneClaireRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<FrameUniforms>() as u64),
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<FrameUniforms>() as u64
+                        ),
                     },
                     count: None,
                 },
@@ -370,6 +668,7 @@ impl LigneClaireRenderer {
             ],
         });
 
+        // 2-Target MRT G-Buffer + single hardware Depth32Float buffer (no redundant depth_meta_tex!)
         let post_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post_bgl"),
             entries: &[
@@ -379,7 +678,9 @@ impl LigneClaireRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(std::mem::size_of::<FrameUniforms>() as u64),
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<FrameUniforms>() as u64
+                        ),
                     },
                     count: None,
                 },
@@ -406,21 +707,11 @@ impl LigneClaireRenderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
@@ -544,11 +835,6 @@ impl LigneClaireRenderer {
         });
 
         let gbuf_targets = [
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 blend: None,
@@ -714,12 +1000,23 @@ impl LigneClaireRenderer {
         Self {
             output_format,
             models,
-            world_bufs: GpuWorldBuffers {
-                road: None,
-                terrain: None,
-                wire: None,
-                water: None,
-            },
+            static_model_verts,
+            static_model_indices,
+            mega_vb,
+            mega_ib,
+            world_offsets,
+            skin_src_vb,
+            skin_params_buf,
+            skin_jobs_buf,
+            skin_bgl,
+            skin_bg,
+            skin_pipeline,
+            cull_uniform_buf,
+            draw_desc_buf,
+            indirect_buf,
+            cull_bgl,
+            cull_bg,
+            cull_pipeline,
             frame_buf,
             shadow_frame_bufs,
             obj_align,
@@ -747,6 +1044,38 @@ impl LigneClaireRenderer {
             gbuf,
             egui_renderer,
         }
+    }
+
+    fn make_skin_bg(
+        device: &wgpu::Device,
+        bgl: &wgpu::BindGroupLayout,
+        params_buf: &wgpu::Buffer,
+        jobs_buf: &wgpu::Buffer,
+        src_vb: &wgpu::Buffer,
+        dst_vb: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skin_bg"),
+            layout: bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: jobs_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: src_vb.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: dst_vb.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     fn make_obj_bg(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout, buf: &wgpu::Buffer) -> wgpu::BindGroup {
@@ -790,12 +1119,10 @@ impl LigneClaireRenderer {
         };
         let lit_tex = mk_tex("gbuf_lit", wgpu::TextureFormat::Rgba8Unorm);
         let normal_tex = mk_tex("gbuf_norm", wgpu::TextureFormat::Rgba8Unorm);
-        let depth_meta_tex = mk_tex("gbuf_depth_meta", wgpu::TextureFormat::Rgba8Unorm);
         let scene_depth_tex = mk_tex("gbuf_z", wgpu::TextureFormat::Depth32Float);
 
         let lit_view = lit_tex.create_view(&Default::default());
         let normal_view = normal_tex.create_view(&Default::default());
-        let depth_meta_view = depth_meta_tex.create_view(&Default::default());
         let scene_depth_view = scene_depth_tex.create_view(&Default::default());
 
         let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -816,14 +1143,10 @@ impl LigneClaireRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&depth_meta_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
                     resource: wgpu::BindingResource::Sampler(gbuf_sampler),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
+                    binding: 4,
                     resource: wgpu::BindingResource::TextureView(&scene_depth_view),
                 },
             ],
@@ -836,8 +1159,6 @@ impl LigneClaireRenderer {
             lit_view,
             normal_tex,
             normal_view,
-            depth_meta_tex,
-            depth_meta_view,
             scene_depth_tex,
             scene_depth_view,
             post_bind_group,
@@ -848,17 +1169,93 @@ impl LigneClaireRenderer {
         let w = width.max(1);
         let h = height.max(1);
         if self.gbuf.width != w || self.gbuf.height != h {
-            self.gbuf = Self::create_gbuffer(device, w, h, &self.post_bgl, &self.frame_buf, &self.gbuf_sampler);
+            self.gbuf = Self::create_gbuffer(
+                device,
+                w,
+                h,
+                &self.post_bgl,
+                &self.frame_buf,
+                &self.gbuf_sampler,
+            );
         }
     }
 
     pub fn upload_world(&mut self, device: &wgpu::Device, geo: &StaticWorldGeometry) {
-        self.world_bufs = GpuWorldBuffers {
-            road: upload_mesh(device, "world_road", &geo.road_vertices, &geo.road_indices),
-            terrain: upload_mesh(device, "world_terrain", &geo.terrain_vertices, &geo.terrain_indices),
-            wire: upload_mesh(device, "world_wire", &geo.wire_vertices, &geo.wire_indices),
-            water: upload_mesh(device, "world_water", &geo.water_vertices, &geo.water_indices),
+        let mut all_verts = Vec::with_capacity(
+            self.static_model_verts.len()
+                + geo.road_vertices.len()
+                + geo.terrain_vertices.len()
+                + geo.wire_vertices.len()
+                + geo.water_vertices.len()
+                + MAX_SKINNED_VERTS,
+        );
+        let mut all_indices = Vec::with_capacity(
+            self.static_model_indices.len()
+                + geo.road_indices.len()
+                + geo.terrain_indices.len()
+                + geo.wire_indices.len()
+                + geo.water_indices.len(),
+        );
+
+        all_verts.extend_from_slice(&self.static_model_verts);
+        all_indices.extend_from_slice(&self.static_model_indices);
+
+        let road_base_vertex = all_verts.len() as i32;
+        let road_first_index = all_indices.len() as u32;
+        all_verts.extend_from_slice(&geo.road_vertices);
+        all_indices.extend_from_slice(&geo.road_indices);
+
+        let terrain_base_vertex = all_verts.len() as i32;
+        let terrain_first_index = all_indices.len() as u32;
+        all_verts.extend_from_slice(&geo.terrain_vertices);
+        all_indices.extend_from_slice(&geo.terrain_indices);
+
+        let wire_base_vertex = all_verts.len() as i32;
+        let wire_first_index = all_indices.len() as u32;
+        all_verts.extend_from_slice(&geo.wire_vertices);
+        all_indices.extend_from_slice(&geo.wire_indices);
+
+        let water_base_vertex = all_verts.len() as i32;
+        let water_first_index = all_indices.len() as u32;
+        let water_index_count = geo.water_indices.len() as u32;
+        all_verts.extend_from_slice(&geo.water_vertices);
+        all_indices.extend_from_slice(&geo.water_indices);
+
+        let skinned_base_vertex = all_verts.len() as u32;
+        all_verts.resize(all_verts.len() + MAX_SKINNED_VERTS, SceneVertex::zeroed());
+
+        self.mega_vb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mega_vb"),
+            contents: bytemuck::cast_slice(&all_verts),
+            usage: wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+        });
+        self.mega_ib = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mega_ib"),
+            contents: bytemuck::cast_slice(&all_indices),
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        });
+        self.world_offsets = GpuWorldOffsets {
+            road_base_vertex,
+            road_first_index,
+            terrain_base_vertex,
+            terrain_first_index,
+            wire_base_vertex,
+            wire_first_index,
+            water_base_vertex,
+            water_first_index,
+            water_index_count,
+            skinned_base_vertex,
         };
+        self.skin_bg = Self::make_skin_bg(
+            device,
+            &self.skin_bgl,
+            &self.skin_params_buf,
+            &self.skin_jobs_buf,
+            &self.skin_src_vb,
+            &self.mega_vb,
+        );
     }
 
     fn push_obj_uniform(
@@ -870,31 +1267,6 @@ impl LigneClaireRenderer {
         object_id: u32,
         outline_weight: f32,
         crease_sensitivity: f32,
-    ) -> u32 {
-        self.push_obj_uniform_skinned(
-            device,
-            idx,
-            model,
-            tint,
-            object_id,
-            outline_weight,
-            crease_sensitivity,
-            [0.0; 4],
-            [0.0; 4],
-        )
-    }
-
-    fn push_obj_uniform_skinned(
-        &mut self,
-        device: &wgpu::Device,
-        idx: usize,
-        model: Mat4,
-        tint: [f32; 4],
-        object_id: u32,
-        outline_weight: f32,
-        crease_sensitivity: f32,
-        skin_pose_r: [f32; 4],
-        skin_pose_l: [f32; 4],
     ) -> u32 {
         if idx >= self.obj_capacity {
             let new_cap = (idx + 512).next_power_of_two();
@@ -919,8 +1291,8 @@ impl LigneClaireRenderer {
                 crease_sensitivity,
                 0.0,
             ],
-            skin_pose_r,
-            skin_pose_l,
+            skin_pose_r: [0.0; 4],
+            skin_pose_l: [0.0; 4],
         };
         let off = idx * self.obj_align;
         let bytes = bytemuck::bytes_of(&u);
@@ -928,6 +1300,7 @@ impl LigneClaireRenderer {
         off as u32
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render_frame(
         &mut self,
         device: &wgpu::Device,
@@ -1028,7 +1401,6 @@ impl LigneClaireRenderer {
 
         // 3-Cascade Directional Shadow Map (CSM) with texel snapping & per-cascade caster size filtering
         let sun_dir = geo.hero_sun_dir;
-        // Keep shadow projection elevation >= ~26 deg so shadows anchor cleanly beneath wheels, shoes & posts without extreme grazing stretch
         let shadow_sun_dir = Vec3::new(sun_dir.x, sun_dir.y.max(0.46), sun_dir.z).normalize();
         let view_fwd = (cam_target - cam_pos).normalize_or_zero();
         let csm_centers: [Vec3; NUM_SHADOW_CASCADES] = if is_menu {
@@ -1046,10 +1418,6 @@ impl LigneClaireRenderer {
         };
         let csm_ortho_radii: [f32; NUM_SHADOW_CASCADES] = [12.0, 42.0, 128.0];
         let csm_split_depths: [f32; NUM_SHADOW_CASCADES] = [18.0, 68.0, 215.0];
-        // Per-cascade shadow caster bounding-radius filters:
-        // - Cascade 0 (near): renders all detailed shadow casters (spokes, rider limbs, lamps, benches, fences) up to 28m radius
-        // - Cascade 1 (mid): skips small clutter/detail casters (< 0.90m radius) and renders mid-to-large casters (0.90m .. 45m)
-        // - Cascade 2 (far): skips small & mid casters (< 2.50m radius) and only renders large landmarks/trees/buildings (2.50m .. 90m)
         let csm_min_caster_r: [f32; NUM_SHADOW_CASCADES] = [0.0, 0.90, 2.50];
         let csm_max_caster_r: [f32; NUM_SHADOW_CASCADES] = [28.0, 45.0, 90.0];
 
@@ -1069,7 +1437,6 @@ impl LigneClaireRenderer {
             light_proj * light_view
         });
 
-        // Biome atmospheric palette
         let (sun_col, sky_zen, sky_hor, fog_col, fog_dens, disc_str) = match biome {
             BiomeId::MountainClimb => (
                 [1.00, 0.91, 0.72, near],
@@ -1137,11 +1504,35 @@ impl LigneClaireRenderer {
             queue.write_buffer(&self.shadow_frame_bufs[ci], 0, bytemuck::bytes_of(&shadow_u));
         }
 
-        // Gather draw list (static world, visible props, riders)
+        // -----------------------------------------------------------------
+        // CPU SECTOR STREAMING & ENQUEUEING TO GPU
+        // -----------------------------------------------------------------
+        let max_prop_dist = graphics.prop_draw_distance_m.clamp(150.0, 1200.0);
+        let mut active_sector_bitmask: u32 = 1u32 << 31; // Bit 31 reserved for active cyclists
+        let mut active_sector_ids: Vec<usize> = Vec::with_capacity(geo.sectors.len());
+        for sec in &geo.sectors {
+            let to_sec = sec.center - cam_pos;
+            let dist = to_sec.length();
+            let in_front = to_sec.dot(view_fwd) >= -(sec.bounding_radius + 45.0);
+            if dist <= (max_prop_dist * 0.65 + sec.bounding_radius) && (in_front || dist <= sec.bounding_radius + 65.0) {
+                let sid = (sec.sector_id as usize).min(30);
+                active_sector_bitmask |= 1u32 << sid;
+                active_sector_ids.push(sid);
+            }
+        }
+        if active_sector_ids.is_empty() {
+            for (sid, _) in geo.sectors.iter().enumerate() {
+                active_sector_bitmask |= 1u32 << sid;
+                active_sector_ids.push(sid);
+            }
+        }
+
         let mut draw_count = 0usize;
-        let mut scene_draws = Vec::with_capacity(2048);
-        let mut shadow_draws: [Vec<DrawItem>; NUM_SHADOW_CASCADES] =
-            std::array::from_fn(|_| Vec::with_capacity(256));
+        let mut draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(2048);
+        let mut enqueued_cmds: Vec<EnqueuedCommandRef> = Vec::with_capacity(2048);
+        let mut skin_jobs: Vec<SkinJob> = Vec::with_capacity(32);
+        let mut max_skin_verts_in_job = 0u32;
+        let mut skinned_vert_cursor = self.world_offsets.skinned_base_vertex;
 
         let transform_max_scale = |m: &Mat4| -> f32 {
             let sx = m.x_axis.truncate().length();
@@ -1149,34 +1540,15 @@ impl LigneClaireRenderer {
             let sz = m.z_axis.truncate().length();
             sx.max(sy).max(sz).max(0.01)
         };
-        let caster_in_cascade = |ci: usize, pos: Vec3, world_radius: f32| -> bool {
-            if !graphics.shadows_enabled {
-                return false;
-            }
-            if world_radius < csm_min_caster_r[ci] || world_radius > csm_max_caster_r[ci] {
-                return false;
-            }
-            let r_bound = csm_ortho_radii[ci] * 1.18 + world_radius;
-            pos.distance(csm_centers[ci]) <= r_bound
-        };
 
-        // Road, terrain, wires
-        if self.world_bufs.road.is_some() {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0);
-            draw_count += 1;
-            scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 1 });
-        }
-        if self.world_bufs.terrain.is_some() {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0);
-            draw_count += 1;
-            scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 2 });
-        }
-        if self.world_bufs.wire.is_some() {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0);
-            draw_count += 1;
-            scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 3 });
-        }
-        let water_off = if self.world_bufs.water.is_some() {
+        // 1. Enqueue active sector road, terrain, wire slices & sector props
+        let road_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0);
+        draw_count += 1;
+        let terrain_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0);
+        draw_count += 1;
+        let wire_off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0);
+        draw_count += 1;
+        let water_off = if self.world_offsets.water_index_count > 0 {
             let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 4, 0.0, 0.0);
             draw_count += 1;
             Some(off)
@@ -1184,58 +1556,107 @@ impl LigneClaireRenderer {
             None
         };
 
-        // Visible props (distance-culled)
-        let max_prop_dist = graphics.prop_draw_distance_m.clamp(150.0, 1200.0);
-        for p in &geo.props {
-            let pos = p.transform.w_axis.truncate();
-            let dist_cam = pos.distance(cam_pos);
-            if dist_cam > max_prop_dist {
-                continue;
+        for &sid in &active_sector_ids {
+            let sec = &geo.sectors[sid];
+            let sec_flag = (sid as u32) | 512u32; // bit 9 = is_sector_surface
+            if sec.road_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = draw_descs.len();
+                draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.road_index_count,
+                    first_index: self.world_offsets.road_first_index + sec.road_index_offset,
+                    base_vertex: self.world_offsets.road_base_vertex,
+                    flags: sec_flag,
+                });
+                enqueued_cmds.push(EnqueuedCommandRef {
+                    cmd_slot: slot,
+                    offset_bytes: road_off,
+                    shadow_candidate: false,
+                });
             }
-            let (num_secs, base_bound_r) = self
-                .models
-                .get(&p.model)
-                .map(|m| (m.sections.len(), m.bounding_radius))
-                .unwrap_or((0, 0.5));
-            let world_radius = base_bound_r * transform_max_scale(&p.transform);
-            // Keep internal crease lines strictly off organic/rock/foliage geometry (silhouette-only!)
-            // and allow subtle architectural corner creases only on crisp man-made structures.
-            let crease_s = match p.model {
-                ModelId::ColonialTownhouse
-                | ModelId::CoastalBuildingTall
-                | ModelId::CoastalBuildingMid
-                | ModelId::RanchHouse => 0.45,
-                _ => 0.0,
-            };
-            let off = self.push_obj_uniform(
-                device,
-                draw_count,
-                p.transform,
-                p.tint,
-                p.object_id,
-                p.outline_weight,
-                crease_s,
-            );
-            draw_count += 1;
-            let cascade_mask: [bool; NUM_SHADOW_CASCADES] =
-                std::array::from_fn(|ci| p.cast_shadow && caster_in_cascade(ci, pos, world_radius));
-            for si in 0..num_secs {
-                let item = DrawItem {
-                    offset_bytes: off,
-                    model_id: Some(p.model),
-                    section_idx: si,
-                    world_kind: 0,
-                };
-                for ci in 0..NUM_SHADOW_CASCADES {
-                    if cascade_mask[ci] {
-                        shadow_draws[ci].push(item.clone());
-                    }
+            if sec.terrain_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = draw_descs.len();
+                draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.terrain_index_count,
+                    first_index: self.world_offsets.terrain_first_index + sec.terrain_index_offset,
+                    base_vertex: self.world_offsets.terrain_base_vertex,
+                    flags: sec_flag,
+                });
+                enqueued_cmds.push(EnqueuedCommandRef {
+                    cmd_slot: slot,
+                    offset_bytes: terrain_off,
+                    shadow_candidate: false,
+                });
+            }
+            if sec.wire_index_count > 0 && draw_descs.len() < MAX_INDIRECT_COMMANDS {
+                let slot = draw_descs.len();
+                draw_descs.push(GpuDrawDesc {
+                    pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    index_count: sec.wire_index_count,
+                    first_index: self.world_offsets.wire_first_index + sec.wire_index_offset,
+                    base_vertex: self.world_offsets.wire_base_vertex,
+                    flags: sec_flag,
+                });
+                enqueued_cmds.push(EnqueuedCommandRef {
+                    cmd_slot: slot,
+                    offset_bytes: wire_off,
+                    shadow_candidate: false,
+                });
+            }
+
+            // Enqueue all props inside this active sector; GPU compute shader culls & emits DrawIndexedIndirectCmd
+            for &pi in &sec.prop_indices {
+                if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
+                    break;
                 }
-                scene_draws.push(item);
+                let p = &geo.props[pi];
+                let pos = p.transform.w_axis.truncate();
+                let (model_secs, base_bound_r) = match self.models.get(&p.model) {
+                    Some(m) => (m.sections.clone(), m.bounding_radius),
+                    None => continue,
+                };
+                let world_radius = base_bound_r * transform_max_scale(&p.transform);
+                let crease_s = match p.model {
+                    ModelId::ColonialTownhouse
+                    | ModelId::CoastalBuildingTall
+                    | ModelId::CoastalBuildingMid
+                    | ModelId::RanchHouse => 0.45,
+                    _ => 0.0,
+                };
+                let off = self.push_obj_uniform(
+                    device,
+                    draw_count,
+                    p.transform,
+                    p.tint,
+                    p.object_id,
+                    p.outline_weight,
+                    crease_s,
+                );
+                draw_count += 1;
+                let flags = (sid as u32) | if p.cast_shadow { 256u32 } else { 0u32 };
+                for ms in &model_secs {
+                    if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
+                        break;
+                    }
+                    let slot = draw_descs.len();
+                    draw_descs.push(GpuDrawDesc {
+                        pos_radius: [pos.x, pos.y, pos.z, world_radius],
+                        index_count: ms.index_count,
+                        first_index: ms.first_index,
+                        base_vertex: ms.base_vertex,
+                        flags,
+                    });
+                    enqueued_cmds.push(EnqueuedCommandRef {
+                        cmd_slot: slot,
+                        offset_bytes: off,
+                        shadow_candidate: p.cast_shadow,
+                    });
+                }
             }
         }
 
-        // Riders (Player + AI peloton when in game)
+        // 2. Enqueue dynamic Riders (pre-skinned via Compute Shader before rendering!)
         let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(96);
         let player_pose = if is_menu {
             RiderPoseMode::MenuStopped
@@ -1278,22 +1699,24 @@ impl LigneClaireRenderer {
         }
 
         for rp in &rider_parts {
-            let (sec_roles, base_bound_r): (Vec<MaterialRole>, f32) = self
-                .models
-                .get(&rp.model)
-                .map(|m| (m.sections.iter().map(|s| s.role).collect(), m.bounding_radius))
-                .unwrap_or_default();
+            let (model_secs, base_bound_r) = match self.models.get(&rp.model) {
+                Some(m) => (m.sections.clone(), m.bounding_radius),
+                None => continue,
+            };
             let pos = rp.transform.w_axis.truncate();
             let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
-            let cascade_mask: [bool; NUM_SHADOW_CASCADES] =
-                std::array::from_fn(|ci| caster_in_cascade(ci, pos, world_radius));
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
                 ModelId::BikeFrame | ModelId::BikeCrank => (0.86, 0.0),
                 _ => (0.92, 0.0),
             };
-            for (si, role) in sec_roles.into_iter().enumerate() {
-                let tint = match role {
+            let is_skinned = rp.skin_pose_r[3] > 0.5;
+
+            for ms in &model_secs {
+                if draw_descs.len() >= MAX_INDIRECT_COMMANDS {
+                    break;
+                }
+                let tint = match ms.role {
                     MaterialRole::BikeFrame => rp.frame_color,
                     MaterialRole::JerseyPrimary => rp.jersey_primary,
                     MaterialRole::JerseySecondary => rp.jersey_secondary,
@@ -1302,7 +1725,7 @@ impl LigneClaireRenderer {
                     MaterialRole::HelmetAccent => rp.helmet_accent,
                     _ => [1.0, 1.0, 1.0, 1.0],
                 };
-                let off = self.push_obj_uniform_skinned(
+                let off = self.push_obj_uniform(
                     device,
                     draw_count,
                     rp.transform,
@@ -1310,35 +1733,143 @@ impl LigneClaireRenderer {
                     rp.object_id,
                     outline_w,
                     crease_s,
-                    rp.skin_pose_r,
-                    rp.skin_pose_l,
                 );
                 draw_count += 1;
-                let item = DrawItem {
-                    offset_bytes: off,
-                    model_id: Some(rp.model),
-                    section_idx: si,
-                    world_kind: 0,
+
+                let eff_base_vertex = if is_skinned
+                    && skin_jobs.len() < MAX_SKIN_JOBS
+                    && (skinned_vert_cursor - self.world_offsets.skinned_base_vertex + ms.vertex_count)
+                        <= MAX_SKINNED_VERTS as u32
+                {
+                    let dst_offset = skinned_vert_cursor;
+                    skinned_vert_cursor += ms.vertex_count;
+                    max_skin_verts_in_job = max_skin_verts_in_job.max(ms.vertex_count);
+                    skin_jobs.push(SkinJob {
+                        skin_pose_r: rp.skin_pose_r,
+                        skin_pose_l: rp.skin_pose_l,
+                        src_offset: ms.skin_src_offset,
+                        dst_offset,
+                        vertex_count: ms.vertex_count,
+                        _pad: 0,
+                    });
+                    dst_offset as i32
+                } else {
+                    ms.base_vertex
                 };
-                for ci in 0..NUM_SHADOW_CASCADES {
-                    if cascade_mask[ci] {
-                        shadow_draws[ci].push(item.clone());
-                    }
-                }
-                scene_draws.push(item);
+
+                let slot = draw_descs.len();
+                draw_descs.push(GpuDrawDesc {
+                    pos_radius: [pos.x, pos.y, pos.z, world_radius],
+                    index_count: ms.index_count,
+                    first_index: ms.first_index,
+                    base_vertex: eff_base_vertex,
+                    flags: 31u32 | 256u32, // sector 31 (dynamic rider), cast_shadow = true
+                });
+                enqueued_cmds.push(EnqueuedCommandRef {
+                    cmd_slot: slot,
+                    offset_bytes: off,
+                    shadow_candidate: true,
+                });
             }
         }
 
+        // Upload object uniforms, skinning jobs, and sector draw descriptors to GPU
         let write_bytes = draw_count * self.obj_align;
         if write_bytes > 0 {
             queue.write_buffer(&self.obj_buf, 0, &self.obj_staging[..write_bytes]);
+        }
+
+        let skin_params = SkinDispatchParams {
+            job_count: skin_jobs.len() as u32,
+            max_verts_per_job: max_skin_verts_in_job,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        queue.write_buffer(&self.skin_params_buf, 0, bytemuck::bytes_of(&skin_params));
+        if !skin_jobs.is_empty() {
+            queue.write_buffer(&self.skin_jobs_buf, 0, bytemuck::cast_slice(&skin_jobs));
+        }
+
+        let cmd_count = draw_descs.len() as u32;
+        let cull_u = SectorCullUniforms {
+            camera_pos_max_dist: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
+            csm_center_r0: [
+                csm_centers[0].x,
+                csm_centers[0].y,
+                csm_centers[0].z,
+                csm_ortho_radii[0] * 1.18,
+            ],
+            csm_center_r1: [
+                csm_centers[1].x,
+                csm_centers[1].y,
+                csm_centers[1].z,
+                csm_ortho_radii[1] * 1.18,
+            ],
+            csm_center_r2: [
+                csm_centers[2].x,
+                csm_centers[2].y,
+                csm_centers[2].z,
+                csm_ortho_radii[2] * 1.18,
+            ],
+            csm_min_caster_r: [
+                csm_min_caster_r[0],
+                csm_min_caster_r[1],
+                csm_min_caster_r[2],
+                if graphics.shadows_enabled { 1.0 } else { 0.0 },
+            ],
+            csm_max_caster_r: [csm_max_caster_r[0], csm_max_caster_r[1], csm_max_caster_r[2], 0.0],
+            active_sector_info: [
+                active_sector_bitmask,
+                cmd_count,
+                MAX_INDIRECT_COMMANDS as u32,
+                0,
+            ],
+        };
+        queue.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&cull_u));
+        if !draw_descs.is_empty() {
+            queue.write_buffer(&self.draw_desc_buf, 0, bytemuck::cast_slice(&draw_descs));
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cadence_encoder"),
         });
 
-        // Pass 1..3: 3-Cascade Directional Shadow Maps (2048x2048x3)
+        // -----------------------------------------------------------------
+        // Pass 0a: Pre-Render Compute Skinning Pass (skinning.wgsl)
+        // -----------------------------------------------------------------
+        if !skin_jobs.is_empty() && max_skin_verts_in_job > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("skinning_compute_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.skin_pipeline);
+            cpass.set_bind_group(0, &self.skin_bg, &[]);
+            cpass.dispatch_workgroups(
+                max_skin_verts_in_job.div_ceil(64),
+                skin_jobs.len() as u32,
+                1,
+            );
+        }
+
+        // -----------------------------------------------------------------
+        // Pass 0b: GPU Sector Culling & Indirect Command Generation Pass (cull_indirect.wgsl)
+        // -----------------------------------------------------------------
+        if cmd_count > 0 {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cull_indirect_compute_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.cull_pipeline);
+            cpass.set_bind_group(0, &self.cull_bg, &[]);
+            cpass.dispatch_workgroups(cmd_count.div_ceil(64), 1, 1);
+        }
+
+        let indirect_cmd_size = std::mem::size_of::<DrawIndexedIndirectCmd>() as u64;
+        let pass_stride_bytes = (MAX_INDIRECT_COMMANDS as u64) * indirect_cmd_size;
+
+        // -----------------------------------------------------------------
+        // Passes 1..3: 3-Cascade Directional Shadow Maps via GPU Indirect Commands
+        // -----------------------------------------------------------------
         for ci in 0..NUM_SHADOW_CASCADES {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(&format!("shadow_pass_c{ci}")),
@@ -1357,18 +1888,24 @@ impl LigneClaireRenderer {
             });
             rpass.set_pipeline(&self.shadow_pipeline);
             rpass.set_bind_group(0, &self.shadow_frame_bgs[ci], &[]);
-            for item in &shadow_draws[ci] {
-                if let Some(mid) = item.model_id {
-                    let sec = &self.models[&mid].sections[item.section_idx];
-                    rpass.set_bind_group(1, &self.obj_bg, &[item.offset_bytes]);
-                    rpass.set_vertex_buffer(0, sec.vertex_buf.slice(..));
-                    rpass.set_index_buffer(sec.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..sec.index_count, 0, 0..1);
+            rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
+            rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
+            let cascade_base_bytes = ((ci as u64) + 1) * pass_stride_bytes;
+            if graphics.shadows_enabled {
+                for cmd in &enqueued_cmds {
+                    if cmd.shadow_candidate {
+                        rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                        let indirect_offset =
+                            cascade_base_bytes + (cmd.cmd_slot as u64) * indirect_cmd_size;
+                        rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                    }
                 }
             }
         }
 
-        // Pass 2 + 3 + 4: Sky -> Scene -> Water into MRT G-Buffer
+        // -----------------------------------------------------------------
+        // Pass 4: Sky -> Indirect Sector Scene -> Water into 2-Target MRT G-Buffer + Single Depth32Float
+        // -----------------------------------------------------------------
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("gbuffer_pass"),
@@ -1391,15 +1928,6 @@ impl LigneClaireRenderer {
                             store: wgpu::StoreOp::Store,
                         },
                     }),
-                    Some(wgpu::RenderPassColorAttachment {
-                        view: &self.gbuf.depth_meta_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    }),
                 ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.gbuf.scene_depth_view,
@@ -1414,61 +1942,42 @@ impl LigneClaireRenderer {
                 multiview_mask: None,
             });
 
-            // Sky fullscreen
+            // 4a. Sky fullscreen
             rpass.set_pipeline(&self.sky_pipeline);
             rpass.set_bind_group(0, &self.frame_bg, &[]);
             rpass.draw(0..3, 0..1);
 
-            // Scene geometry (road, terrain, wire, props, riders)
+            // 4b. Scene geometry via GPU Indirect Draw Commands for active enqueued sectors
             rpass.set_pipeline(&self.scene_pipeline);
             rpass.set_bind_group(0, &self.scene_frame_bg, &[]);
-            for item in &scene_draws {
-                rpass.set_bind_group(1, &self.obj_bg, &[item.offset_bytes]);
-                match item.world_kind {
-                    1 => {
-                        if let Some((vb, ib, count)) = &self.world_bufs.road {
-                            rpass.set_vertex_buffer(0, vb.slice(..));
-                            rpass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                            rpass.draw_indexed(0..*count, 0, 0..1);
-                        }
-                    }
-                    2 => {
-                        if let Some((vb, ib, count)) = &self.world_bufs.terrain {
-                            rpass.set_vertex_buffer(0, vb.slice(..));
-                            rpass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                            rpass.draw_indexed(0..*count, 0, 0..1);
-                        }
-                    }
-                    3 => {
-                        if let Some((vb, ib, count)) = &self.world_bufs.wire {
-                            rpass.set_vertex_buffer(0, vb.slice(..));
-                            rpass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                            rpass.draw_indexed(0..*count, 0, 0..1);
-                        }
-                    }
-                    _ => {
-                        if let Some(mid) = item.model_id {
-                            let sec = &self.models[&mid].sections[item.section_idx];
-                            rpass.set_vertex_buffer(0, sec.vertex_buf.slice(..));
-                            rpass.set_index_buffer(sec.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                            rpass.draw_indexed(0..sec.index_count, 0, 0..1);
-                        }
-                    }
-                }
+            rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
+            rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
+            for cmd in &enqueued_cmds {
+                rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
+                rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
             }
 
-            // Water pass
-            if let (Some(w_off), Some((vb, ib, count))) = (water_off, &self.world_bufs.water) {
+            // 4c. Water pass
+            if let Some(w_off) = water_off {
                 rpass.set_pipeline(&self.water_pipeline);
                 rpass.set_bind_group(0, &self.frame_bg, &[]);
                 rpass.set_bind_group(1, &self.obj_bg, &[w_off]);
-                rpass.set_vertex_buffer(0, vb.slice(..));
-                rpass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                rpass.draw_indexed(0..*count, 0, 0..1);
+                rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
+                rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
+                rpass.draw_indexed(
+                    self.world_offsets.water_first_index
+                        ..(self.world_offsets.water_first_index
+                            + self.world_offsets.water_index_count),
+                    self.world_offsets.water_base_vertex,
+                    0..1,
+                );
             }
         }
 
+        // -----------------------------------------------------------------
         // Pass 5: Fullscreen Ligne Claire Ink Outline Post-Process -> Target Surface
+        // -----------------------------------------------------------------
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_pass"),
@@ -1491,7 +2000,9 @@ impl LigneClaireRenderer {
             rpass.draw(0..3, 0..1);
         }
 
+        // -----------------------------------------------------------------
         // Pass 6: Stylized egui HUD Overlay
+        // -----------------------------------------------------------------
         if let Some((paint_jobs, screen_desc)) = egui_jobs {
             let mut extra_cmds = self.egui_renderer.update_buffers(
                 device,
@@ -1530,10 +2041,11 @@ impl LigneClaireRenderer {
             &self.shadow_tex,
             &self.gbuf.lit_tex,
             &self.gbuf.normal_tex,
-            &self.gbuf.depth_meta_tex,
             &self.gbuf.scene_depth_tex,
             &self.frame_bgl,
             &self.scene_frame_bgl,
+            &self.cull_bgl,
         );
     }
 }
+

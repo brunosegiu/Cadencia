@@ -380,11 +380,16 @@ mod tests {
 
     #[test]
     fn level_name_parsing_and_random_biome_are_valid() {
+        assert_eq!(std::mem::size_of::<crate::assets::SceneVertex>(), 24);
         assert_eq!(BiomeId::from_str_arg("mountain"), Some(BiomeId::MountainClimb));
         assert_eq!(BiomeId::from_str_arg("coastal"), Some(BiomeId::CoastalPromenade));
         assert_eq!(BiomeId::from_str_arg("rural"), Some(BiomeId::RollingRuralGravel));
         assert_eq!(BiomeId::from_str_arg("unknown_world"), None);
         let r = BiomeId::random();
         assert!(BiomeId::ALL.contains(&r));
+
+        let sp = RouteSpline::for_biome(BiomeId::CoastalPromenade);
+        let geo = crate::world::terrain::build_biome_world(BiomeId::CoastalPromenade, &sp);
+        assert_eq!(geo.sectors.len(), crate::world::terrain::NUM_WORLD_SECTORS);
     }
 }

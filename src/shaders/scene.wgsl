@@ -21,8 +21,8 @@ struct ObjectUniforms {
     normal_mat: mat4x4<f32>,
     tint: vec4<f32>,
     obj_info: vec4<f32>, // x = object_id/255, y = outline_weight, z = crease_sens, w = mat_override
-    skin_pose_r: vec4<f32>, // (thigh_ang_r, calf_ang_r, foot_ang_r, is_skinned)
-    skin_pose_l: vec4<f32>, // (thigh_ang_l, calf_ang_l, foot_ang_l, 0.0)
+    skin_pose_r: vec4<f32>,
+    skin_pose_l: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -32,10 +32,9 @@ struct ObjectUniforms {
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
-    @location(3) color: vec4<f32>,
-    @location(4) material_type: u32,
+    @location(1) normal_mat: vec4<f32>, // Snorm8x4: xyz = normal, w = material_type / 127.0
+    @location(2) uv: vec2<f32>,         // Float16x2
+    @location(3) color: vec4<f32>,      // Unorm8x4
 };
 
 struct SceneOut {
@@ -46,15 +45,23 @@ struct SceneOut {
     @location(3) uv: vec2<f32>,
     @location(4) color: vec4<f32>,
     @location(5) @interpolate(flat) material_type: u32,
-    @location(6) shadow_pos: vec4<f32>,
-    @location(7) view_depth: f32,
+    @location(6) view_depth: f32,
 };
 
 struct GBufferOut {
-    @location(0) lit_color: vec4<f32>,
-    @location(1) normal_id: vec4<f32>,
-    @location(2) depth_meta: vec4<f32>,
+    @location(0) lit_color: vec4<f32>, // rgb = lit color, a = outline_weight
+    @location(1) normal_id: vec4<f32>, // rg = octahedral view normal, b = crease_sensitivity, a = object_id
 };
+
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z) + 1e-5));
+    let res = select(
+        (1.0 - abs(p.yx)) * vec2<f32>(select(-1.0, 1.0, p.x >= 0.0), select(-1.0, 1.0, p.y >= 0.0)),
+        p,
+        n.z >= 0.0
+    );
+    return res * 0.5 + 0.5;
+}
 
 fn hash21(p: vec2<f32>) -> f32 {
     let q = fract(p * vec2<f32>(127.1, 311.7));
@@ -72,97 +79,12 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-fn rot_x_vec(v: vec3<f32>, ang: f32) -> vec3<f32> {
-    let c = cos(ang);
-    let s = sin(ang);
-    return vec3<f32>(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
-}
-
-fn animate_upper_body(local_pos: vec3<f32>, anim_phase: f32) -> vec3<f32> {
-    let x = local_pos.x;
-    let y_bl = -local_pos.z;
-    let z_bl = local_pos.y;
-    let side = select(-1.0, 1.0, x >= 0.0);
-
-    // Hands at y_bl >= 0.61 stay locked onto the brake hoods while torso, shoulders & elbows flex!
-    let hand_lock = 1.0 - smoothstep(0.30, 0.61, y_bl);
-    let torso_w = smoothstep(0.04, 0.38, z_bl) * hand_lock;
-
-    let sway_x = 0.011 * sin(anim_phase) * torso_w;
-    let bob_z  = (0.0076 * sin(anim_phase * 2.0) + 0.0042 * cos(anim_phase * 0.85)) * torso_w;
-    let breath_y = 0.006 * sin(anim_phase * 2.0) * torso_w;
-
-    // Dynamic elbow flex & pump (peaks around elbow y_bl ~ 0.37, fades to 0 at shoulder & wrist)
-    let elbow_zone = exp(-pow((y_bl - 0.37) / 0.13, 2.0)) * smoothstep(0.11, 0.18, abs(x));
-    let side_phase = anim_phase + select(3.14159265, 0.0, x >= 0.0);
-    let elbow_dx = side * 0.012 * (0.5 + 0.5 * sin(side_phase)) * elbow_zone;
-    let elbow_dz = -0.0136 * (0.5 + 0.5 * cos(side_phase)) * elbow_zone;
-
-    return vec3<f32>(
-        local_pos.x + sway_x + elbow_dx,
-        local_pos.y + bob_z + elbow_dz,
-        local_pos.z - breath_y
-    );
-}
-
+// Skinning is pre-evaluated in skinning.wgsl compute shader prior to rendering.
 @vertex
 fn vs_scene(in: VertexInput) -> SceneOut {
-    var local_pos = in.pos;
-    var local_nrm = in.normal;
-
-    // 4-bone Linear Blend Skinning + Upper-Body/Arm/Elbow Animation for unified cyclist character
-    if (obj.skin_pose_r.w > 0.5) {
-        let anim_phase = obj.skin_pose_l.w;
-        local_pos = animate_upper_body(local_pos, anim_phase);
-
-        if (obj.skin_pose_r.w < 1.5) {
-            let x = local_pos.x;
-            let y_bl = -local_pos.z;
-            let z_bl = local_pos.y;
-            if (!(z_bl > 0.045 || (z_bl > -0.14 && y_bl > 0.15))) {
-                let angles = select(obj.skin_pose_l.xyz, obj.skin_pose_r.xyz, x >= 0.0);
-                let side = select(-1.0, 1.0, x >= 0.0);
-                let th_ang = angles.x;
-                let ca_ang = angles.y;
-                let fo_ang = angles.z;
-
-                // Anatomical hip crease: keeps full round buttcheeks (y_bl < -0.03) anchored on the saddle!
-                let hip_fold_z   = -0.015 + clamp(y_bl * 0.45, -0.045, 0.030);
-                let w_hip_thigh  = 1.0 - smoothstep(hip_fold_z - 0.045, hip_fold_z + 0.030, z_bl);
-                let w_pelvis     = 1.0 - w_hip_thigh;
-                let w_knee_calf  = 1.0 - smoothstep(-0.485, -0.375, z_bl);
-                let w_ankle_foot = 1.0 - smoothstep(-0.865, -0.815, z_bl);
-
-                let wt_pelvis = w_pelvis;
-                let wt_thigh  = w_hip_thigh * (1.0 - w_knee_calf);
-                let wt_calf   = w_hip_thigh * w_knee_calf * (1.0 - w_ankle_foot);
-                let wt_foot   = w_hip_thigh * w_knee_calf * w_ankle_foot;
-
-                let rest_hip   = vec3<f32>(side * 0.105,  0.000, 0.0);
-                let rest_knee  = vec3<f32>(side * 0.105, -0.430, 0.0);
-                let rest_ankle = vec3<f32>(side * 0.105, -0.845, 0.0);
-
-                let posed_hip   = rest_hip;
-                let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(th_ang), -0.430 * sin(th_ang));
-                let posed_ankle = posed_knee + vec3<f32>(0.0, -0.415 * cos(ca_ang), -0.415 * sin(ca_ang));
-
-                let p_pelvis = local_pos;
-                let p_thigh  = posed_hip   + rot_x_vec(local_pos - rest_hip,   th_ang);
-                let p_calf   = posed_knee  + rot_x_vec(local_pos - rest_knee,  ca_ang);
-                let p_foot   = posed_ankle + rot_x_vec(local_pos - rest_ankle, fo_ang);
-
-                let n_pelvis = local_nrm;
-                let n_thigh  = rot_x_vec(local_nrm, th_ang);
-                let n_calf   = rot_x_vec(local_nrm, ca_ang);
-                let n_foot   = rot_x_vec(local_nrm, fo_ang);
-
-                local_pos = wt_pelvis * p_pelvis + wt_thigh * p_thigh + wt_calf * p_calf + wt_foot * p_foot;
-                local_nrm = normalize(wt_pelvis * n_pelvis + wt_thigh * n_thigh + wt_calf * n_calf + wt_foot * n_foot);
-            }
-        }
-    }
-
-    let wp = obj.model * vec4<f32>(local_pos, 1.0);
+    let wp = obj.model * vec4<f32>(in.pos, 1.0);
+    let local_nrm = normalize(in.normal_mat.xyz);
+    let mat_id = u32(round(max(in.normal_mat.w * 127.0, 0.0)));
     let wn = normalize((obj.normal_mat * vec4<f32>(local_nrm, 0.0)).xyz);
     let vn = normalize((frame.view_mat * vec4<f32>(wn, 0.0)).xyz);
     let vp = frame.view_mat * wp;
@@ -174,8 +96,7 @@ fn vs_scene(in: VertexInput) -> SceneOut {
     out.view_normal = vn;
     out.uv = in.uv;
     out.color = in.color * obj.tint;
-    out.material_type = in.material_type;
-    out.shadow_pos = frame.light_view_proj * wp;
+    out.material_type = mat_id;
     out.view_depth = -vp.z;
     return out;
 }
@@ -208,7 +129,6 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
     }
     let slope = clamp(1.0 - ndotl, 0.0, 1.0);
 
-    // Subtle receiver normal offset + ultra-tight depth bias eliminates Peter Panning at lamp/bench/tire bases!
     let wp0 = vec4<f32>(world_pos + world_normal * (0.004 * slope), 1.0);
     let wp1 = vec4<f32>(world_pos + world_normal * (0.012 * slope), 1.0);
     let wp2 = vec4<f32>(world_pos + world_normal * (0.032 * slope), 1.0);
@@ -282,20 +202,16 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
 
     // Procedural Ligne Claire surface texture & markings
     if (mat_type == 1u) {
-        // Gravel dirt road: warm ochre, organic wheel ruts, dusty edges, scattered irregular pebbles
         let n_big = value_noise(in.world_pos.xz * 0.35);
         let n_med = value_noise(in.world_pos.xz * 1.9);
         let n_fine = value_noise(in.world_pos.xz * 6.5);
         albedo *= 0.92 + 0.14 * n_big + 0.06 * n_med + 0.04 * n_fine;
-        // Organic twin wheel-track darkening around u = 0.34 and u = 0.66
         let rut_jit = (n_big - 0.5) * 0.04;
         let rut_l = exp(-pow((in.uv.x - 0.34 + rut_jit) * 9.5, 2.0));
         let rut_r = exp(-pow((in.uv.x - 0.66 - rut_jit) * 9.5, 2.0));
         albedo *= 1.0 - 0.08 * (rut_l + rut_r);
-        // Dusty grassy verge darkening at road margins
         let verge = smoothstep(0.41, 0.50, abs(in.uv.x - 0.5));
         albedo = mix(albedo, vec3<f32>(0.58, 0.52, 0.36), verge * 0.60);
-        // Organic scattered small stones & faint comic ink specks (non-grid)
         let p_uv = in.world_pos.xz * 2.8 + vec2<f32>(n_big * 1.4, n_med * 1.4);
         let p_cell = floor(p_uv);
         let p_f = fract(p_uv) - 0.5;
@@ -307,21 +223,17 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
             let dot_mask = smoothstep(rad, rad * 0.45, d_p) * smoothstep(55.0, 6.0, in.view_depth);
             albedo = mix(albedo, vec3<f32>(0.36, 0.29, 0.22), dot_mask * 0.58);
         }
-        // Keep interior road free of false crease ink lines
         outline_w = 0.28;
         crease_s = 0.0;
     } else if (mat_type == 3u) {
-        // Coastal asphalt: warm slate-grey with crisp double gold center lines & dashed white lane dividers
         let n_asp = value_noise(in.world_pos.xz * 1.2);
         albedo *= 0.95 + 0.09 * n_asp;
         let u = in.uv.x;
         let d_dist = in.uv.y;
-        // Double golden-ochre center lines
         let gold_l = smoothstep(0.011, 0.005, abs(u - 0.487));
         let gold_r = smoothstep(0.011, 0.005, abs(u - 0.513));
         let gold_mask = max(gold_l, gold_r);
         albedo = mix(albedo, vec3<f32>(0.84, 0.70, 0.41), gold_mask);
-        // Dashed white lane lines at u = 0.24 and u = 0.76
         let dash = step(0.46, fract(d_dist * 0.09));
         let lane_l = smoothstep(0.011, 0.005, abs(u - 0.24)) * dash;
         let lane_r = smoothstep(0.011, 0.005, abs(u - 0.76)) * dash;
@@ -330,7 +242,6 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
         outline_w = 0.25;
         crease_s = 0.0;
     } else if (mat_type == 6u) {
-        // Coastal boardwalk sandstone paving tile grid
         let tile_uv = vec2<f32>(in.uv.x * 0.82, in.uv.y * 0.55);
         let cell = floor(tile_uv);
         let f_uv = fract(tile_uv);
@@ -343,7 +254,6 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
         outline_w = 0.35;
         crease_s = 0.15;
     } else if (mat_type == 0u) {
-        // Terrain & stratified rocks: painterly mottled grass + horizontal sandstone cliff strata
         let n_mottle = value_noise(in.world_pos.xz * 0.12) * 0.65 + value_noise(in.world_pos.xz * 0.55) * 0.35;
         albedo *= 0.89 + 0.22 * n_mottle;
         let steep = smoothstep(0.76, 0.44, N.y);
@@ -351,15 +261,12 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
         let strata_col = vec3<f32>(0.64, 0.57, 0.46) * (0.88 + 0.16 * strata + 0.12 * n_mottle);
         albedo = mix(albedo, strata_col, steep * 0.80);
     } else if (mat_type == 2u) {
-        // Foliage subtle warm dappled leaf variation
         let n_leaf = value_noise(in.world_pos.xz * 1.8 + in.world_pos.y * 1.1);
         albedo *= 0.90 + 0.18 * n_leaf;
     }
 
-    // Clean crisp 2-tone stylized cel lighting (bright warm sunlit plane + airy cool slate shadow)
     let shadow_vis = sample_csm_shadow(in.world_pos, N, in.view_depth, max(ndotl, 0.0));
     let diffuse_raw = ndotl * 0.5 + 0.5;
-    // Crisp cel terminator with subtle soft anti-aliased transition
     let cel_lit = smoothstep(0.45, 0.52, diffuse_raw);
     let cel_hi = smoothstep(0.76, 0.86, diffuse_raw);
     let effective_sun = cel_lit * mix(0.18, 1.0, shadow_vis);
@@ -369,29 +276,20 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
 
     var lit_col = mix(shadow_tint, lit_base, smoothstep(0.28, 0.68, effective_sun));
 
-    // Subtle clean sunlit rim accent on silhouettes
     let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.6);
     let rim = fresnel * max(ndotl * 0.5 + 0.5, 0.20) * shadow_vis;
     lit_col += frame.sun_color.rgb * rim * 0.09;
 
-    // Aerial perspective atmospheric fog
     let fog_dist = max(in.view_depth - 35.0, 0.0);
     let fog_factor = 1.0 - exp(-fog_dist * frame.fog_color.w);
     lit_col = mix(lit_col, frame.fog_color.rgb, clamp(fog_factor, 0.0, 0.82));
 
-    // Fade outline weight subtly on very distant hills so horizon stays painterly
     let dist_outline_fade = 1.0 - smoothstep(140.0, 420.0, in.view_depth) * 0.65;
     outline_w *= dist_outline_fade;
 
-    // Encode 16-bit linear depth into R & G (0..far_plane)
-    let norm_d = clamp(in.view_depth / frame.sky_zenith.w, 0.0, 0.9999);
-    let d_scaled = norm_d * 255.0;
-    let d_hi = floor(d_scaled) / 255.0;
-    let d_lo = fract(d_scaled);
-
     var out: GBufferOut;
-    out.lit_color = vec4<f32>(clamp(lit_col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    out.normal_id = vec4<f32>(normalize(in.view_normal) * 0.5 + 0.5, obj.obj_info.x);
-    out.depth_meta = vec4<f32>(d_hi, d_lo, clamp(outline_w, 0.0, 1.0), clamp(crease_s, 0.0, 1.0));
+    out.lit_color = vec4<f32>(clamp(lit_col, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(outline_w, 0.0, 1.0));
+    let oct_n = oct_encode(normalize(in.view_normal));
+    out.normal_id = vec4<f32>(oct_n.x, oct_n.y, clamp(crease_s, 0.0, 1.0), obj.obj_info.x);
     return out;
 }

@@ -24,10 +24,19 @@ struct SkyOut {
 };
 
 struct GBufferOut {
-    @location(0) lit_color: vec4<f32>,
-    @location(1) normal_id: vec4<f32>,
-    @location(2) depth_meta: vec4<f32>,
+    @location(0) lit_color: vec4<f32>, // rgb = lit color, a = outline_weight
+    @location(1) normal_id: vec4<f32>, // rg = octahedral view normal, b = crease_sensitivity, a = object_id
 };
+
+fn oct_encode(n: vec3<f32>) -> vec2<f32> {
+    let p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z) + 1e-5));
+    let res = select(
+        (1.0 - abs(p.yx)) * vec2<f32>(select(-1.0, 1.0, p.x >= 0.0), select(-1.0, 1.0, p.y >= 0.0)),
+        p,
+        n.z >= 0.0
+    );
+    return res * 0.5 + 0.5;
+}
 
 fn hash2(p: vec2<f32>) -> f32 {
     let q = fract(p * vec2<f32>(123.34, 456.21));
@@ -105,9 +114,9 @@ fn fs_sky(in: SkyOut) -> GBufferOut {
     }
 
     var out: GBufferOut;
-    out.lit_color = vec4<f32>(clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
-    // Neutral sky normal & outline_weight = 0.0 so sky/clouds never get ink strokes
-    out.normal_id = vec4<f32>(0.5, 0.5, 1.0, 0.0);
-    out.depth_meta = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    // outline_weight = 0.0 in alpha so sky/clouds never get ink strokes
+    out.lit_color = vec4<f32>(clamp(sky, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0);
+    let oct_n = oct_encode(vec3<f32>(0.0, 0.0, 1.0));
+    out.normal_id = vec4<f32>(oct_n.x, oct_n.y, 0.0, 0.0);
     return out;
 }

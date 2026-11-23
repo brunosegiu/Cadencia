@@ -252,8 +252,7 @@ impl WindowGpuState {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cadence_device"),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                    .using_resolution(adapter.limits()),
+                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 ..Default::default()
             })
             .await

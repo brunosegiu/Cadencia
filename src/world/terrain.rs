@@ -3,6 +3,8 @@ use glam::{Mat4, Vec3};
 use crate::assets::{ModelId, SceneVertex};
 use crate::world::{BiomeId, RouteSpline};
 
+pub const NUM_WORLD_SECTORS: usize = 16;
+
 #[derive(Debug, Clone)]
 pub struct PropInstance {
     pub model: ModelId,
@@ -12,6 +14,23 @@ pub struct PropInstance {
     pub outline_weight: f32,
     pub crease_sensitivity: f32,
     pub cast_shadow: bool,
+    pub sector_id: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorldSector {
+    pub sector_id: u32,
+    pub start_dist_m: f32,
+    pub end_dist_m: f32,
+    pub center: Vec3,
+    pub bounding_radius: f32,
+    pub road_index_offset: u32,
+    pub road_index_count: u32,
+    pub terrain_index_offset: u32,
+    pub terrain_index_count: u32,
+    pub wire_index_offset: u32,
+    pub wire_index_count: u32,
+    pub prop_indices: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,7 +44,68 @@ pub struct StaticWorldGeometry {
     pub water_vertices: Vec<SceneVertex>,
     pub water_indices: Vec<u32>,
     pub props: Vec<PropInstance>,
+    pub sectors: Vec<WorldSector>,
     pub hero_sun_dir: Vec3,
+}
+
+pub fn sector_for_pos(spline: &RouteSpline, pos: Vec3) -> usize {
+    let n = spline.samples.len();
+    if n == 0 {
+        return 0;
+    }
+    let step = 16usize.min(n).max(1);
+    let mut best_idx = 0usize;
+    let mut best_d2 = f32::MAX;
+    let mut i = 0usize;
+    while i < n {
+        let p = spline.samples[i].pos;
+        let dx = pos.x - p.x;
+        let dz = pos.z - p.z;
+        let d2 = dx * dx + dz * dz;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best_idx = i;
+        }
+        i += step;
+    }
+    let base = best_idx;
+    for off in -(step as isize)..=(step as isize) {
+        let idx = (base as isize + off).rem_euclid(n as isize) as usize;
+        let p = spline.samples[idx].pos;
+        let dx = pos.x - p.x;
+        let dz = pos.z - p.z;
+        let d2 = dx * dx + dz * dz;
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best_idx = idx;
+        }
+    }
+    ((best_idx * NUM_WORLD_SECTORS) / n).min(NUM_WORLD_SECTORS - 1)
+}
+
+fn partition_indices_by_sector(
+    spline: &RouteSpline,
+    verts: &[SceneVertex],
+    indices: &mut Vec<u32>,
+) -> [(u32, u32); NUM_WORLD_SECTORS] {
+    let mut buckets: [Vec<u32>; NUM_WORLD_SECTORS] = std::array::from_fn(|_| Vec::new());
+    for tri in indices.chunks_exact(3) {
+        let p0 = Vec3::from(verts[tri[0] as usize].pos);
+        let p1 = Vec3::from(verts[tri[1] as usize].pos);
+        let p2 = Vec3::from(verts[tri[2] as usize].pos);
+        let centroid = (p0 + p1 + p2) * (1.0 / 3.0);
+        let sec = sector_for_pos(spline, centroid);
+        buckets[sec].extend_from_slice(tri);
+    }
+    indices.clear();
+    let mut ranges = [(0u32, 0u32); NUM_WORLD_SECTORS];
+    for (sec, b) in buckets.into_iter().enumerate() {
+        let start = indices.len() as u32;
+        let count = b.len() as u32;
+        indices.extend(b);
+        ranges[sec] = (start, count);
+    }
+    ranges
 }
 
 fn hash_u32(mut x: u32) -> f32 {
@@ -209,11 +289,12 @@ fn compute_grid_normals(verts: &mut [SceneVertex], indices: &[u32]) {
     }
     for (v, n) in verts.iter_mut().zip(accum) {
         let nn = n.normalize_or_zero();
-        v.normal = if nn.length_squared() > 0.01 {
+        let n_arr = if nn.length_squared() > 0.01 {
             nn.into()
         } else {
             [0.0, 1.0, 0.0]
         };
+        v.set_normal(n_arr);
     }
 }
 
@@ -249,13 +330,13 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
             };
             let p = s.pos + s.right * lat + Vec3::Y * crown;
             let u = li as f32 / (n_rl - 1) as f32;
-            road_vertices.push(SceneVertex {
-                pos: p.into(),
-                normal: s.up.into(),
-                uv: [u, d_uv],
-                color: road_col,
-                material_type: road_mat_type,
-            });
+            road_vertices.push(SceneVertex::new(
+                p.into(),
+                s.up.into(),
+                [u, d_uv],
+                road_col,
+                road_mat_type,
+            ));
         }
     }
     for r in 0..ring_count {
@@ -375,13 +456,13 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 } else {
                     0
                 };
-                terrain_vertices.push(SceneVertex {
-                    pos: p.into(),
-                    normal: [0.0, 1.0, 0.0],
-                    uv: [lat, d_uv],
-                    color: col,
-                    material_type: mat_type,
-                });
+                terrain_vertices.push(SceneVertex::new(
+                    p.into(),
+                    [0.0, 1.0, 0.0],
+                    [lat, d_uv],
+                    col,
+                    mat_type,
+                ));
             }
         }
         for r in 0..ring_count {
@@ -426,18 +507,18 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 push_quad(
                     &mut wire_vertices,
                     &mut wire_indices,
-                    SceneVertex { pos: (p0 - up_off).into(), normal: s0.right.into(), uv: [0.0, 0.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p0 + up_off).into(), normal: s0.right.into(), uv: [1.0, 0.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p1 + up_off).into(), normal: s1.right.into(), uv: [1.0, 1.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p1 - up_off).into(), normal: s1.right.into(), uv: [0.0, 1.0], color: col, material_type: 0 },
+                    SceneVertex::new((p0 - up_off).into(), s0.right.into(), [0.0, 0.0], col, 0),
+                    SceneVertex::new((p0 + up_off).into(), s0.right.into(), [1.0, 0.0], col, 0),
+                    SceneVertex::new((p1 + up_off).into(), s1.right.into(), [1.0, 1.0], col, 0),
+                    SceneVertex::new((p1 - up_off).into(), s1.right.into(), [0.0, 1.0], col, 0),
                 );
                 push_quad(
                     &mut wire_vertices,
                     &mut wire_indices,
-                    SceneVertex { pos: (p0 - side_off).into(), normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p0 + side_off).into(), normal: [0.0, 1.0, 0.0], uv: [1.0, 0.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p1 + side_off).into(), normal: [0.0, 1.0, 0.0], uv: [1.0, 1.0], color: col, material_type: 0 },
-                    SceneVertex { pos: (p1 - side_off).into(), normal: [0.0, 1.0, 0.0], uv: [0.0, 1.0], color: col, material_type: 0 },
+                    SceneVertex::new((p0 - side_off).into(), [0.0, 1.0, 0.0], [0.0, 0.0], col, 0),
+                    SceneVertex::new((p0 + side_off).into(), [0.0, 1.0, 0.0], [1.0, 0.0], col, 0),
+                    SceneVertex::new((p1 + side_off).into(), [0.0, 1.0, 0.0], [1.0, 1.0], col, 0),
+                    SceneVertex::new((p1 - side_off).into(), [0.0, 1.0, 0.0], [0.0, 1.0], col, 0),
                 );
             }
         }
@@ -467,10 +548,10 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 push_quad(
                     &mut water_vertices,
                     &mut water_indices,
-                    SceneVertex { pos: p0l.into(), normal: [0.0, 1.0, 0.0], uv: [0.0, d0], color: col, material_type: 7 },
-                    SceneVertex { pos: p0r.into(), normal: [0.0, 1.0, 0.0], uv: [1.0, d0], color: col, material_type: 7 },
-                    SceneVertex { pos: p1r.into(), normal: [0.0, 1.0, 0.0], uv: [1.0, d1], color: col, material_type: 7 },
-                    SceneVertex { pos: p1l.into(), normal: [0.0, 1.0, 0.0], uv: [0.0, d1], color: col, material_type: 7 },
+                    SceneVertex::new(p0l.into(), [0.0, 1.0, 0.0], [0.0, d0], col, 7),
+                    SceneVertex::new(p0r.into(), [0.0, 1.0, 0.0], [1.0, d0], col, 7),
+                    SceneVertex::new(p1r.into(), [0.0, 1.0, 0.0], [1.0, d1], col, 7),
+                    SceneVertex::new(p1l.into(), [0.0, 1.0, 0.0], [0.0, d1], col, 7),
                 );
             }
         }
@@ -484,10 +565,10 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
             push_quad(
                 &mut water_vertices,
                 &mut water_indices,
-                SceneVertex { pos: [cx - half, ocean_y, cz + half], normal: [0.0, 1.0, 0.0], uv: [0.0, 0.0], color: col, material_type: 7 },
-                SceneVertex { pos: [cx + half, ocean_y, cz + half], normal: [0.0, 1.0, 0.0], uv: [1.0, 0.0], color: col, material_type: 7 },
-                SceneVertex { pos: [cx + half, ocean_y, cz - half], normal: [0.0, 1.0, 0.0], uv: [1.0, 1.0], color: col, material_type: 7 },
-                SceneVertex { pos: [cx - half, ocean_y, cz - half], normal: [0.0, 1.0, 0.0], uv: [0.0, 1.0], color: col, material_type: 7 },
+                SceneVertex::new([cx - half, ocean_y, cz + half], [0.0, 1.0, 0.0], [0.0, 0.0], col, 7),
+                SceneVertex::new([cx + half, ocean_y, cz + half], [0.0, 1.0, 0.0], [1.0, 0.0], col, 7),
+                SceneVertex::new([cx + half, ocean_y, cz - half], [0.0, 1.0, 0.0], [1.0, 1.0], col, 7),
+                SceneVertex::new([cx - half, ocean_y, cz - half], [0.0, 1.0, 0.0], [0.0, 1.0], col, 7),
             );
         }
         BiomeId::RollingRuralGravel => {}
@@ -501,6 +582,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         let xform = Mat4::from_translation(pos)
             * Mat4::from_rotation_y(yaw)
             * Mat4::from_scale(scale);
+        let sector_id = sector_for_pos(spline, pos) as u32;
         props.push(PropInstance {
             model,
             transform: xform,
@@ -509,6 +591,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
             outline_weight: outline_w,
             crease_sensitivity: crease,
             cast_shadow: shadow,
+            sector_id,
         });
     };
 
@@ -902,6 +985,45 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         }
     }
 
+    // 6. Partition Road, Terrain, Wires, and Props into NUM_WORLD_SECTORS spatial sectors
+    let road_ranges = partition_indices_by_sector(spline, &road_vertices, &mut road_indices);
+    let terrain_ranges = partition_indices_by_sector(spline, &terrain_vertices, &mut terrain_indices);
+    let wire_ranges = partition_indices_by_sector(spline, &wire_vertices, &mut wire_indices);
+
+    let sector_len_m = spline.total_length_m / NUM_WORLD_SECTORS as f32;
+    let mut sectors = Vec::with_capacity(NUM_WORLD_SECTORS);
+    for sec_i in 0..NUM_WORLD_SECTORS {
+        let start_dist_m = sec_i as f32 * sector_len_m;
+        let end_dist_m = (sec_i + 1) as f32 * sector_len_m;
+        let mid_s = spline.sample(start_dist_m + 0.5 * sector_len_m);
+        let s0 = spline.sample(start_dist_m);
+        let s1 = spline.sample(end_dist_m);
+        let mut prop_indices = Vec::new();
+        let mut max_r2 = (s0.pos.distance_squared(mid_s.pos)).max(s1.pos.distance_squared(mid_s.pos));
+        for (pi, p) in props.iter().enumerate() {
+            if p.sector_id == sec_i as u32 {
+                prop_indices.push(pi);
+                let p_pos = p.transform.w_axis.truncate();
+                max_r2 = max_r2.max(p_pos.distance_squared(mid_s.pos));
+            }
+        }
+        let bounding_radius = (max_r2.sqrt() + 45.0).max(sector_len_m * 0.85);
+        sectors.push(WorldSector {
+            sector_id: sec_i as u32,
+            start_dist_m,
+            end_dist_m,
+            center: mid_s.pos,
+            bounding_radius,
+            road_index_offset: road_ranges[sec_i].0,
+            road_index_count: road_ranges[sec_i].1,
+            terrain_index_offset: terrain_ranges[sec_i].0,
+            terrain_index_count: terrain_ranges[sec_i].1,
+            wire_index_offset: wire_ranges[sec_i].0,
+            wire_index_count: wire_ranges[sec_i].1,
+            prop_indices,
+        });
+    }
+
     let hero = spline.sample(spline.hero_start_dist_m);
     let hero_sun_dir = match biome {
         BiomeId::CoastalPromenade => (hero.tangent * 0.85 + hero.right * 0.50 + Vec3::Y * 0.195).normalize(),
@@ -919,6 +1041,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         water_vertices,
         water_indices,
         props,
+        sectors,
         hero_sun_dir,
     }
 }

@@ -5,17 +5,68 @@ use glam::{Vec2, Vec3, Vec4};
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct SceneVertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 4],
-    pub material_type: u32,
+    pub pos: [f32; 3],       // 12 bytes (Float32x3, offset 0)
+    pub normal_mat: [i8; 4], //  4 bytes (Snorm8x4,  offset 12: xyz = normal, w = material_type)
+    pub uv: [u16; 2],        //  4 bytes (Float16x2, offset 16: IEEE-754 f16 UVs)
+    pub color: [u8; 4],      //  4 bytes (Unorm8x4,  offset 20: RGBA8 vertex color)
+}
+
+pub fn f32_to_f16(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+    let mant = bits & 0x007F_FFFF;
+    if exp <= 0 {
+        if exp < -10 {
+            sign
+        } else {
+            let m = (mant | 0x0080_0000) >> (1 - exp + 13);
+            sign | (m as u16)
+        }
+    } else if exp >= 31 {
+        sign | 0x7C00
+    } else {
+        sign | ((exp as u16) << 10) | ((mant >> 13) as u16)
+    }
+}
+
+pub fn pack_snorm8(v: f32) -> i8 {
+    (v.clamp(-1.0, 1.0) * 127.0).round() as i8
+}
+
+pub fn pack_unorm8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 impl SceneVertex {
+    pub fn new(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 4], material_type: u32) -> Self {
+        Self {
+            pos,
+            normal_mat: [
+                pack_snorm8(normal[0]),
+                pack_snorm8(normal[1]),
+                pack_snorm8(normal[2]),
+                (material_type.min(127)) as i8,
+            ],
+            uv: [f32_to_f16(uv[0]), f32_to_f16(uv[1])],
+            color: [
+                pack_unorm8(color[0]),
+                pack_unorm8(color[1]),
+                pack_unorm8(color[2]),
+                pack_unorm8(color[3]),
+            ],
+        }
+    }
+
+    pub fn set_normal(&mut self, normal: [f32; 3]) {
+        self.normal_mat[0] = pack_snorm8(normal[0]);
+        self.normal_mat[1] = pack_snorm8(normal[1]);
+        self.normal_mat[2] = pack_snorm8(normal[2]);
+    }
+
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<SceneVertex>() as wgpu::BufferAddress,
+            array_stride: std::mem::size_of::<SceneVertex>() as wgpu::BufferAddress, // 24 bytes
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
                 wgpu::VertexAttribute {
@@ -26,22 +77,17 @@ impl SceneVertex {
                 wgpu::VertexAttribute {
                     offset: 12,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Snorm8x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: 24,
+                    offset: 16,
                     shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: wgpu::VertexFormat::Float16x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: 32,
+                    offset: 20,
                     shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                wgpu::VertexAttribute {
-                    offset: 48,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Uint32,
+                    format: wgpu::VertexFormat::Unorm8x4,
                 },
             ],
         }
@@ -218,13 +264,13 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
 
             let mut vertices = Vec::with_capacity(positions.len());
             for i in 0..positions.len() {
-                vertices.push(SceneVertex {
-                    pos: positions[i],
-                    normal: normals[i],
-                    uv: uvs[i],
-                    color: vert_color,
+                vertices.push(SceneVertex::new(
+                    positions[i],
+                    normals[i],
+                    uvs[i],
+                    vert_color,
                     material_type,
-                });
+                ));
             }
 
             // If normals were absent, compute geometric triangle normals
@@ -235,7 +281,7 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
                     let c = Vec3::from(vertices[tri[2] as usize].pos);
                     let n = (b - a).cross(c - a).normalize_or_zero();
                     for &idx in tri {
-                        vertices[idx as usize].normal = n.into();
+                        vertices[idx as usize].set_normal(n.into());
                     }
                 }
             }

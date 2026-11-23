@@ -17,11 +17,10 @@ struct FrameUniforms {
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
-@group(0) @binding(1) var lit_tex: texture_2d<f32>;
-@group(0) @binding(2) var normal_tex: texture_2d<f32>;
-@group(0) @binding(3) var depth_tex: texture_2d<f32>;
-@group(0) @binding(4) var gbuf_sampler: sampler;
-@group(0) @binding(5) var hw_depth_tex: texture_depth_2d;
+@group(0) @binding(1) var lit_tex: texture_2d<f32>;      // rgb = lit color, a = outline_weight
+@group(0) @binding(2) var normal_tex: texture_2d<f32>;   // rg = octahedral view normal, b = crease_sensitivity, a = object_id
+@group(0) @binding(3) var gbuf_sampler: sampler;
+@group(0) @binding(4) var hw_depth_tex: texture_depth_2d; // Single hardware Depth32Float buffer, linearized on demand
 
 struct PostOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -40,6 +39,15 @@ fn vs_post(@builtin(vertex_index) idx: u32) -> PostOut {
     out.clip_pos = vec4<f32>(p, 0.0, 1.0);
     out.uv = vec2<f32>(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     return out;
+}
+
+fn oct_decode(e: vec2<f32>) -> vec3<f32> {
+    let f = e * 2.0 - 1.0;
+    var n = vec3<f32>(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+    let t = clamp(-n.z, 0.0, 1.0);
+    n.x += select(t, -t, n.x >= 0.0);
+    n.y += select(t, -t, n.y >= 0.0);
+    return normalize(n);
 }
 
 fn load_linear_depth(coord: vec2<i32>, max_c: vec2<i32>) -> f32 {
@@ -66,22 +74,20 @@ fn fs_post(in: PostOut) -> @location(0) vec4<f32> {
     let p_r = min(p + vec2<i32>(1, 0), max_c);
     let p_b = min(p + vec2<i32>(0, 1), max_c);
 
-    // Keep sampler referenced while reading exact 1:1 texels for razor-thin 1px contours
-    let center_col = textureSampleLevel(lit_tex, gbuf_sampler, in.uv, 0.0).rgb;
+    let lit_c = textureSampleLevel(lit_tex, gbuf_sampler, in.uv, 0.0);
+    let lit_r = textureLoad(lit_tex, p_r, 0);
+    let lit_b = textureLoad(lit_tex, p_b, 0);
+    let center_col = lit_c.rgb;
 
     let nid_c = textureLoad(normal_tex, p, 0);
     let nid_r = textureLoad(normal_tex, p_r, 0);
     let nid_b = textureLoad(normal_tex, p_b, 0);
 
-    let dm_c = textureLoad(depth_tex, p, 0);
-    let dm_r = textureLoad(depth_tex, p_r, 0);
-    let dm_b = textureLoad(depth_tex, p_b, 0);
+    let n_c = oct_decode(nid_c.xy);
+    let n_r = oct_decode(nid_r.xy);
+    let n_b = oct_decode(nid_b.xy);
 
-    let n_c = nid_c.xyz * 2.0 - 1.0;
-    let n_r = nid_r.xyz * 2.0 - 1.0;
-    let n_b = nid_b.xyz * 2.0 - 1.0;
-
-    // Exact 32-bit hardware float depth (eliminates all 8-bit contour rings on close curved limbs!)
+    // Linearize the single 32-bit hardware float depth buffer on demand
     let d_c = load_linear_depth(p, max_c);
     let d_r = load_linear_depth(p_r, max_c);
     let d_b = load_linear_depth(p_b, max_c);
@@ -101,26 +107,25 @@ fn fs_post(in: PostOut) -> @location(0) vec4<f32> {
 
     let edge_d = max(ed_r, ed_b);
 
-    // 1-pixel forward-difference Object-ID boundary (separates bike, limbs, helmet, pack, posts, rocks cleanly)
+    // 1-pixel forward-difference Object-ID boundary
     let id_r = step(0.002, abs(nid_r.a - nid_c.a));
     let id_b = step(0.002, abs(nid_b.a - nid_c.a));
     let edge_id = max(id_r, id_b);
 
-    // Strict architectural-only corner crease (crease_s is 0.0 on riders, rocks, terrain, foliage!)
-    let crease_r = min(dm_c.a, dm_r.a);
-    let crease_b = min(dm_c.a, dm_b.a);
+    // Architectural-only corner crease (crease_s in normal_tex.b is 0.0 on riders, rocks, terrain, foliage!)
+    let crease_r = min(nid_c.b, nid_r.b);
+    let crease_b = min(nid_c.b, nid_b.b);
     let en_r = smoothstep(frame.outline_params.y * 0.85, frame.outline_params.y * 1.25, length(n_r - n_c)) * crease_r;
     let en_b = smoothstep(frame.outline_params.y * 0.85, frame.outline_params.y * 1.25, length(n_b - n_c)) * crease_b;
     let edge_n = max(en_r, en_b);
 
-    // Pick outline weight from the foreground/edge-bearing pixel so silhouettes against sky stay crisp & even
-    let w_r = select(dm_r.b, dm_c.b, d_c < d_r);
-    let w_b = select(dm_b.b, dm_c.b, d_c < d_b);
-    let edge_w = max(dm_c.b, max(w_r * max(ed_r, id_r), w_b * max(ed_b, id_b)));
+    // Pick outline weight (stored in lit_tex.a) from the foreground/edge-bearing pixel
+    let w_r = select(lit_r.a, lit_c.a, d_c < d_r);
+    let w_b = select(lit_b.a, lit_c.a, d_c < d_b);
+    let edge_w = max(lit_c.a, max(w_r * max(ed_r, id_r), w_b * max(ed_b, id_b)));
 
     let ink_mask = clamp(max(edge_d, max(edge_id * 0.90, edge_n * 0.70)) * edge_w * frame.outline_params.z, 0.0, 1.0);
 
-    // Use nearest participating pixel depth for smooth aerial-perspective ink fading
     let edge_depth = min(d_c, min(d_r, d_b));
     let near_ink = vec3<f32>(0.13, 0.14, 0.16);
     let far_ink = mix(frame.fog_color.rgb * 0.65, vec3<f32>(0.36, 0.42, 0.46), 0.45);
@@ -128,11 +133,9 @@ fn fs_post(in: PostOut) -> @location(0) vec4<f32> {
 
     var final_col = mix(center_col, ink_col, ink_mask);
 
-    // Whisper-light paper texture
     let grain = (hash_grain(in.uv * frame.screen_params.xy) - 0.5) * frame.outline_params.w;
     final_col = clamp(final_col + vec3<f32>(grain), vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // Convert perceptual display color to linear only when target format is sRGB
     if (frame.sky_horizon.w > 0.5) {
         return vec4<f32>(srgb_to_linear(final_col), 1.0);
     }
