@@ -904,7 +904,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
 
     let hero = spline.sample(spline.hero_start_dist_m);
     let hero_sun_dir = match biome {
-        BiomeId::CoastalPromenade => (hero.tangent * 0.85 + hero.right * 0.50 + Vec3::Y * 0.115).normalize(),
+        BiomeId::CoastalPromenade => (hero.tangent * 0.85 + hero.right * 0.50 + Vec3::Y * 0.195).normalize(),
         BiomeId::MountainClimb => (hero.tangent * 0.72 + hero.right * 0.68 + Vec3::Y * 0.40).normalize(),
         BiomeId::RollingRuralGravel => (hero.tangent * 0.72 + hero.right * 0.68 + Vec3::Y * 0.38).normalize(),
     };

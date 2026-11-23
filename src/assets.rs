@@ -106,6 +106,7 @@ pub struct MeshSection {
 #[derive(Debug, Clone)]
 pub struct LoadedModel {
     pub sections: Vec<MeshSection>,
+    pub bounding_radius: f32,
 }
 
 pub struct AssetBank {
@@ -248,7 +249,25 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
         }
     }
 
-    LoadedModel { sections }
+    let mut min_pt = Vec3::splat(f32::MAX);
+    let mut max_pt = Vec3::splat(f32::MIN);
+    for sec in &sections {
+        for v in &sec.vertices {
+            let p = Vec3::from(v.pos);
+            min_pt = min_pt.min(p);
+            max_pt = max_pt.max(p);
+        }
+    }
+    let bounding_radius = if min_pt.x <= max_pt.x {
+        (0.5 * (max_pt - min_pt)).length().max(0.05)
+    } else {
+        0.5
+    };
+
+    LoadedModel {
+        sections,
+        bounding_radius,
+    }
 }
 
 impl AssetBank {

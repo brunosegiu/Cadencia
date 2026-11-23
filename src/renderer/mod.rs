@@ -13,6 +13,7 @@ use crate::world::terrain::StaticWorldGeometry;
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
+pub const NUM_SHADOW_CASCADES: usize = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GraphicsSettings {
@@ -89,6 +90,9 @@ pub struct FrameUniforms {
     pub fog_color: [f32; 4],
     pub screen_params: [f32; 4],
     pub outline_params: [f32; 4],
+    pub light_view_proj_c1: [[f32; 4]; 4],
+    pub light_view_proj_c2: [[f32; 4]; 4],
+    pub cascade_splits: [f32; 4],
 }
 
 #[repr(C)]
@@ -113,6 +117,7 @@ struct GpuMeshSection {
 
 struct GpuModel {
     sections: Vec<GpuMeshSection>,
+    bounding_radius: f32,
 }
 
 struct GpuWorldBuffers {
@@ -150,13 +155,16 @@ pub struct LigneClaireRenderer {
     world_bufs: GpuWorldBuffers,
 
     frame_buf: wgpu::Buffer,
+    shadow_frame_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
     obj_align: usize,
     obj_buf: wgpu::Buffer,
     obj_capacity: usize,
     obj_staging: Vec<u8>,
 
     shadow_tex: wgpu::Texture,
-    shadow_view: wgpu::TextureView,
+    #[allow(dead_code)]
+    shadow_array_view: wgpu::TextureView,
+    shadow_cascade_views: [wgpu::TextureView; NUM_SHADOW_CASCADES],
     #[allow(dead_code)]
     shadow_sampler: wgpu::Sampler,
     gbuf_sampler: wgpu::Sampler,
@@ -167,6 +175,7 @@ pub struct LigneClaireRenderer {
     obj_bgl: wgpu::BindGroupLayout,
 
     frame_bg: wgpu::BindGroup,
+    shadow_frame_bgs: [wgpu::BindGroup; NUM_SHADOW_CASCADES],
     scene_frame_bg: wgpu::BindGroup,
     obj_bg: wgpu::BindGroup,
 
@@ -232,7 +241,13 @@ impl LigneClaireRenderer {
                     });
                 }
             }
-            models.insert(id, GpuModel { sections: gpu_secs });
+            models.insert(
+                id,
+                GpuModel {
+                    sections: gpu_secs,
+                    bounding_radius: model.bounding_radius,
+                },
+            );
         }
 
         let frame_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -240,6 +255,14 @@ impl LigneClaireRenderer {
             size: std::mem::size_of::<FrameUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let shadow_frame_bufs = std::array::from_fn(|ci| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("shadow_frame_uniforms_c{ci}")),
+                size: std::mem::size_of::<FrameUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
 
         let obj_align = device.limits().min_uniform_buffer_offset_alignment.max(256) as usize;
@@ -252,11 +275,11 @@ impl LigneClaireRenderer {
         });
 
         let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow_map"),
+            label: Some("shadow_csm_array"),
             size: wgpu::Extent3d {
                 width: SHADOW_MAP_SIZE,
                 height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: NUM_SHADOW_CASCADES as u32,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -265,7 +288,22 @@ impl LigneClaireRenderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let shadow_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_array_view = shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow_csm_array_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            base_array_layer: 0,
+            array_layer_count: Some(NUM_SHADOW_CASCADES as u32),
+            ..Default::default()
+        });
+        let shadow_cascade_views = std::array::from_fn(|ci| {
+            shadow_tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("shadow_cascade_view_{ci}")),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: ci as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
 
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow_cmp_sampler"),
@@ -318,7 +356,7 @@ impl LigneClaireRenderer {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -416,6 +454,16 @@ impl LigneClaireRenderer {
                 resource: frame_buf.as_entire_binding(),
             }],
         });
+        let shadow_frame_bgs = std::array::from_fn(|ci| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("shadow_frame_bg_c{ci}")),
+                layout: &frame_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shadow_frame_bufs[ci].as_entire_binding(),
+                }],
+            })
+        });
 
         let scene_frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_frame_bg"),
@@ -427,7 +475,7 @@ impl LigneClaireRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_view),
+                    resource: wgpu::BindingResource::TextureView(&shadow_array_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -484,8 +532,8 @@ impl LigneClaireRenderer {
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 1.5,
+                    constant: 1,
+                    slope_scale: 0.35,
                     clamp: 0.0,
                 },
             }),
@@ -673,12 +721,14 @@ impl LigneClaireRenderer {
                 water: None,
             },
             frame_buf,
+            shadow_frame_bufs,
             obj_align,
             obj_buf,
             obj_capacity,
             obj_staging: vec![0u8; obj_align * obj_capacity],
             shadow_tex,
-            shadow_view,
+            shadow_array_view,
+            shadow_cascade_views,
             shadow_sampler,
             gbuf_sampler,
             frame_bgl,
@@ -686,6 +736,7 @@ impl LigneClaireRenderer {
             post_bgl,
             obj_bgl,
             frame_bg,
+            shadow_frame_bgs,
             scene_frame_bg,
             obj_bg,
             shadow_pipeline,
@@ -975,18 +1026,48 @@ impl LigneClaireRenderer {
         let view_proj = proj_mat * view_mat;
         let inv_view_proj = view_proj.inverse();
 
-        // Tight directional shadow frustum around player (casts crisp spoked wheel shadows!)
+        // 3-Cascade Directional Shadow Map (CSM) with texel snapping & per-cascade caster size filtering
         let sun_dir = geo.hero_sun_dir;
-        let shadow_center = if is_menu {
-            player_pos
+        // Keep shadow projection elevation >= ~26 deg so shadows anchor cleanly beneath wheels, shoes & posts without extreme grazing stretch
+        let shadow_sun_dir = Vec3::new(sun_dir.x, sun_dir.y.max(0.46), sun_dir.z).normalize();
+        let view_fwd = (cam_target - cam_pos).normalize_or_zero();
+        let csm_centers: [Vec3; NUM_SHADOW_CASCADES] = if is_menu {
+            [
+                player_pos + forward * 1.5,
+                player_pos + forward * 24.0,
+                player_pos + forward * 82.0,
+            ]
         } else {
-            player_pos + forward * 4.0
+            [
+                player_pos + forward * 3.0,
+                cam_pos + view_fwd * 28.0,
+                cam_pos + view_fwd * 86.0,
+            ]
         };
-        let light_pos = shadow_center + sun_dir * 45.0;
-        let light_view = Mat4::look_at_rh(light_pos, shadow_center, Vec3::Y);
-        let r_ortho = 24.0_f32;
-        let light_proj = Mat4::orthographic_rh(-r_ortho, r_ortho, -r_ortho, r_ortho, 1.0, 110.0);
-        let light_view_proj = light_proj * light_view;
+        let csm_ortho_radii: [f32; NUM_SHADOW_CASCADES] = [12.0, 42.0, 128.0];
+        let csm_split_depths: [f32; NUM_SHADOW_CASCADES] = [18.0, 68.0, 215.0];
+        // Per-cascade shadow caster bounding-radius filters:
+        // - Cascade 0 (near): renders all detailed shadow casters (spokes, rider limbs, lamps, benches, fences) up to 28m radius
+        // - Cascade 1 (mid): skips small clutter/detail casters (< 0.90m radius) and renders mid-to-large casters (0.90m .. 45m)
+        // - Cascade 2 (far): skips small & mid casters (< 2.50m radius) and only renders large landmarks/trees/buildings (2.50m .. 90m)
+        let csm_min_caster_r: [f32; NUM_SHADOW_CASCADES] = [0.0, 0.90, 2.50];
+        let csm_max_caster_r: [f32; NUM_SHADOW_CASCADES] = [28.0, 45.0, 90.0];
+
+        let light_rot_origin = Mat4::look_at_rh(shadow_sun_dir * 55.0, Vec3::ZERO, Vec3::Y);
+        let cascade_vp: [Mat4; NUM_SHADOW_CASCADES] = std::array::from_fn(|ci| {
+            let center = csm_centers[ci];
+            let r_ortho = csm_ortho_radii[ci];
+            let z_half = (r_ortho * 1.6).max(48.0);
+            let texel_world = (2.0 * r_ortho) / (SHADOW_MAP_SIZE as f32);
+            let c_ls = light_rot_origin.transform_point3(center);
+            let dx = (c_ls.x / texel_world).round() * texel_world - c_ls.x;
+            let dy = (c_ls.y / texel_world).round() * texel_world - c_ls.y;
+            let light_view = Mat4::from_translation(Vec3::new(dx, dy, 0.0))
+                * Mat4::look_at_rh(center + shadow_sun_dir * z_half, center, Vec3::Y);
+            let light_proj =
+                Mat4::orthographic_rh(-r_ortho, r_ortho, -r_ortho, r_ortho, 1.5, z_half * 2.0);
+            light_proj * light_view
+        });
 
         // Biome atmospheric palette
         let (sun_col, sky_zen, sky_hor, fog_col, fog_dens, disc_str) = match biome {
@@ -1021,7 +1102,7 @@ impl LigneClaireRenderer {
             view_proj: view_proj.to_cols_array_2d(),
             inv_view_proj: inv_view_proj.to_cols_array_2d(),
             view_mat: view_mat.to_cols_array_2d(),
-            light_view_proj: light_view_proj.to_cols_array_2d(),
+            light_view_proj: cascade_vp[0].to_cols_array_2d(),
             camera_pos: [cam_pos.x, cam_pos.y, cam_pos.z, time_s],
             sun_dir: [sun_dir.x, sun_dir.y, sun_dir.z, disc_str],
             sun_color: sun_col,
@@ -1040,13 +1121,44 @@ impl LigneClaireRenderer {
                 0.80,
                 0.003,
             ],
+            light_view_proj_c1: cascade_vp[1].to_cols_array_2d(),
+            light_view_proj_c2: cascade_vp[2].to_cols_array_2d(),
+            cascade_splits: [
+                csm_split_depths[0],
+                csm_split_depths[1],
+                csm_split_depths[2],
+                if graphics.shadows_enabled { 1.0 } else { 0.0 },
+            ],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame_u));
+        for ci in 0..NUM_SHADOW_CASCADES {
+            let mut shadow_u = frame_u;
+            shadow_u.light_view_proj = cascade_vp[ci].to_cols_array_2d();
+            queue.write_buffer(&self.shadow_frame_bufs[ci], 0, bytemuck::bytes_of(&shadow_u));
+        }
 
         // Gather draw list (static world, visible props, riders)
         let mut draw_count = 0usize;
         let mut scene_draws = Vec::with_capacity(2048);
-        let mut shadow_draws = Vec::with_capacity(256);
+        let mut shadow_draws: [Vec<DrawItem>; NUM_SHADOW_CASCADES] =
+            std::array::from_fn(|_| Vec::with_capacity(256));
+
+        let transform_max_scale = |m: &Mat4| -> f32 {
+            let sx = m.x_axis.truncate().length();
+            let sy = m.y_axis.truncate().length();
+            let sz = m.z_axis.truncate().length();
+            sx.max(sy).max(sz).max(0.01)
+        };
+        let caster_in_cascade = |ci: usize, pos: Vec3, world_radius: f32| -> bool {
+            if !graphics.shadows_enabled {
+                return false;
+            }
+            if world_radius < csm_min_caster_r[ci] || world_radius > csm_max_caster_r[ci] {
+                return false;
+            }
+            let r_bound = csm_ortho_radii[ci] * 1.18 + world_radius;
+            pos.distance(csm_centers[ci]) <= r_bound
+        };
 
         // Road, terrain, wires
         if self.world_bufs.road.is_some() {
@@ -1080,7 +1192,12 @@ impl LigneClaireRenderer {
             if dist_cam > max_prop_dist {
                 continue;
             }
-            let num_secs = self.models.get(&p.model).map(|m| m.sections.len()).unwrap_or(0);
+            let (num_secs, base_bound_r) = self
+                .models
+                .get(&p.model)
+                .map(|m| (m.sections.len(), m.bounding_radius))
+                .unwrap_or((0, 0.5));
+            let world_radius = base_bound_r * transform_max_scale(&p.transform);
             // Keep internal crease lines strictly off organic/rock/foliage geometry (silhouette-only!)
             // and allow subtle architectural corner creases only on crisp man-made structures.
             let crease_s = match p.model {
@@ -1100,7 +1217,8 @@ impl LigneClaireRenderer {
                 crease_s,
             );
             draw_count += 1;
-            let in_shadow = graphics.shadows_enabled && p.cast_shadow && pos.distance(shadow_center) < 34.0;
+            let cascade_mask: [bool; NUM_SHADOW_CASCADES] =
+                std::array::from_fn(|ci| p.cast_shadow && caster_in_cascade(ci, pos, world_radius));
             for si in 0..num_secs {
                 let item = DrawItem {
                     offset_bytes: off,
@@ -1108,8 +1226,10 @@ impl LigneClaireRenderer {
                     section_idx: si,
                     world_kind: 0,
                 };
-                if in_shadow {
-                    shadow_draws.push(item.clone());
+                for ci in 0..NUM_SHADOW_CASCADES {
+                    if cascade_mask[ci] {
+                        shadow_draws[ci].push(item.clone());
+                    }
                 }
                 scene_draws.push(item);
             }
@@ -1158,13 +1278,15 @@ impl LigneClaireRenderer {
         }
 
         for rp in &rider_parts {
-            let sec_roles: Vec<MaterialRole> = self
+            let (sec_roles, base_bound_r): (Vec<MaterialRole>, f32) = self
                 .models
                 .get(&rp.model)
-                .map(|m| m.sections.iter().map(|s| s.role).collect())
+                .map(|m| (m.sections.iter().map(|s| s.role).collect(), m.bounding_radius))
                 .unwrap_or_default();
             let pos = rp.transform.w_axis.truncate();
-            let in_shadow = graphics.shadows_enabled && pos.distance(shadow_center) < 34.0;
+            let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
+            let cascade_mask: [bool; NUM_SHADOW_CASCADES] =
+                std::array::from_fn(|ci| caster_in_cascade(ci, pos, world_radius));
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
                 ModelId::BikeFrame | ModelId::BikeCrank => (0.86, 0.0),
@@ -1198,8 +1320,10 @@ impl LigneClaireRenderer {
                     section_idx: si,
                     world_kind: 0,
                 };
-                if in_shadow {
-                    shadow_draws.push(item.clone());
+                for ci in 0..NUM_SHADOW_CASCADES {
+                    if cascade_mask[ci] {
+                        shadow_draws[ci].push(item.clone());
+                    }
                 }
                 scene_draws.push(item);
             }
@@ -1214,13 +1338,13 @@ impl LigneClaireRenderer {
             label: Some("cadence_encoder"),
         });
 
-        // Pass 1: Shadow Map (2048x2048)
-        {
+        // Pass 1..3: 3-Cascade Directional Shadow Maps (2048x2048x3)
+        for ci in 0..NUM_SHADOW_CASCADES {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow_pass"),
+                label: Some(&format!("shadow_pass_c{ci}")),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
+                    view: &self.shadow_cascade_views[ci],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -1232,8 +1356,8 @@ impl LigneClaireRenderer {
                 multiview_mask: None,
             });
             rpass.set_pipeline(&self.shadow_pipeline);
-            rpass.set_bind_group(0, &self.frame_bg, &[]);
-            for item in &shadow_draws {
+            rpass.set_bind_group(0, &self.shadow_frame_bgs[ci], &[]);
+            for item in &shadow_draws[ci] {
                 if let Some(mid) = item.model_id {
                     let sec = &self.models[&mid].sections[item.section_idx];
                     rpass.set_bind_group(1, &self.obj_bg, &[item.offset_bytes]);

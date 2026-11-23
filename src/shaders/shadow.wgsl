@@ -11,6 +11,9 @@ struct FrameUniforms {
     fog_color: vec4<f32>,
     screen_params: vec4<f32>,
     outline_params: vec4<f32>,
+    light_view_proj_c1: mat4x4<f32>,
+    light_view_proj_c2: mat4x4<f32>,
+    cascade_splits: vec4<f32>,
 };
 
 struct ObjectUniforms {

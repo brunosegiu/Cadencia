@@ -150,7 +150,7 @@ pub fn build_rider_draw_parts(
     out: &mut Vec<RiderPartDraw>,
 ) {
     let s = spline.sample(distance_m);
-    let world_pos = s.pos + s.right * lateral_m + Vec3::Y * 0.04;
+    let world_pos = s.pos + s.right * lateral_m + Vec3::Y * 0.004;
 
     // Rider basis: local +X = right, local +Y = up, local -Z = forward tangent
     let z_back = (-s.tangent).normalize_or_zero();
@@ -205,10 +205,10 @@ pub fn build_rider_draw_parts(
     // Frame & Crank share object_id base
     push(out, ModelId::BikeFrame, Mat4::IDENTITY, 0);
 
-    // Wheels share distinct id +1 (Blender rear (0, -0.475, 0.340), front (0, +0.465, 0.340) -> wgpu (0, 0.340, +0.475 / -0.465))
+    // Wheels share distinct id +1 (slight pneumatic tire contact-patch compression at y=0.333 anchors tire shadow flush!)
     let wheel_rot = Mat4::from_rotation_x(-eff_wheel_rad);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, 0.475)) * wheel_rot, 1);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, -0.465)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.333, 0.475)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.333, -0.465)) * wheel_rot, 1);
 
     // Bottom bracket: Blender (0, -0.070, 0.275) -> wgpu (0, 0.275, 0.070)
     let crank_rot = Mat4::from_rotation_x(-eff_crank_rad);
@@ -217,7 +217,7 @@ pub fn build_rider_draw_parts(
     // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430, l2 = 0.415)
     let hip_y = match pose_mode {
         RiderPoseMode::Pedaling => 0.965_f32,
-        RiderPoseMode::MenuStopped => 0.905_f32,
+        RiderPoseMode::MenuStopped => 0.885_f32,
     };
     let hip_center = Vec3::new(0.0, hip_y, 0.235);
     let l1 = 0.430_f32;
@@ -251,8 +251,8 @@ pub fn build_rider_draw_parts(
         RiderPoseMode::MenuStopped => {
             // Left leg extended straight down past the bottom bracket with shoe planted flat on the ground!
             let hip_l = Vec3::new(-0.105, hip_y, 0.235);
-            let ground_ankle_l = Vec3::new(-0.140, 0.066, 0.105);
-            solve_ik_target(hip_l, ground_ankle_l, 0.02)
+            let ground_ankle_l = Vec3::new(-0.105, 0.054, 0.205);
+            solve_ik_target(hip_l, ground_ankle_l, 0.0)
         }
     };
 
