@@ -11,12 +11,51 @@ pub enum BiomeId {
 }
 
 impl BiomeId {
+    pub const ALL: [BiomeId; 3] = [
+        BiomeId::MountainClimb,
+        BiomeId::CoastalPromenade,
+        BiomeId::RollingRuralGravel,
+    ];
+
     pub fn name(self) -> &'static str {
         match self {
             BiomeId::MountainClimb => "Mountain Climb",
             BiomeId::CoastalPromenade => "Coastal Promenade",
             BiomeId::RollingRuralGravel => "Rolling Rural Gravel",
         }
+    }
+
+    pub fn subtitle(self) -> &'static str {
+        match self {
+            BiomeId::MountainClimb => "High Alpine Ridge & Canyon Pass",
+            BiomeId::CoastalPromenade => "Sunset Bay Seawall & Colonial Coast",
+            BiomeId::RollingRuralGravel => "Olive Hills & Countryside Gravel Loop",
+        }
+    }
+
+    pub fn stats_summary(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            BiomeId::MountainClimb => ("1.8 KM LOOP", "+6.8% MAX GRADE", "ALPINE TARMAC"),
+            BiomeId::CoastalPromenade => ("2.2 KM LOOP", "+2.4% MAX GRADE", "COASTAL PAVÉ"),
+            BiomeId::RollingRuralGravel => ("1.6 KM LOOP", "+4.5% MAX GRADE", "COMPACT GRAVEL"),
+        }
+    }
+
+    pub fn random() -> Self {
+        let nanos = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15);
+        #[cfg(not(target_arch = "wasm32"))]
+        let seed = nanos ^ ((std::process::id() as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+        #[cfg(target_arch = "wasm32")]
+        let seed = nanos;
+
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = z ^ (z >> 31);
+        Self::ALL[(z as usize) % Self::ALL.len()]
     }
 
     pub fn next(self) -> Self {
@@ -28,10 +67,12 @@ impl BiomeId {
     }
 
     pub fn from_str_arg(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "mountain" | "mountain_climb" => Some(BiomeId::MountainClimb),
-            "coastal" | "coastal_promenade" => Some(BiomeId::CoastalPromenade),
-            "rural" | "rolling_rural_gravel" => Some(BiomeId::RollingRuralGravel),
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mountain" | "mountain_climb" | "mountainclimb" | "1" => Some(BiomeId::MountainClimb),
+            "coastal" | "coastal_promenade" | "coastalpromenade" | "2" => Some(BiomeId::CoastalPromenade),
+            "rural" | "rolling_rural_gravel" | "rollingruralgravel" | "gravel" | "3" => {
+                Some(BiomeId::RollingRuralGravel)
+            }
             _ => None,
         }
     }
@@ -335,5 +376,15 @@ mod tests {
             assert!(hero.tangent.length() > 0.99);
             assert!(hero.grade_pct.is_finite());
         }
+    }
+
+    #[test]
+    fn level_name_parsing_and_random_biome_are_valid() {
+        assert_eq!(BiomeId::from_str_arg("mountain"), Some(BiomeId::MountainClimb));
+        assert_eq!(BiomeId::from_str_arg("coastal"), Some(BiomeId::CoastalPromenade));
+        assert_eq!(BiomeId::from_str_arg("rural"), Some(BiomeId::RollingRuralGravel));
+        assert_eq!(BiomeId::from_str_arg("unknown_world"), None);
+        let r = BiomeId::random();
+        assert!(BiomeId::ALL.contains(&r));
     }
 }

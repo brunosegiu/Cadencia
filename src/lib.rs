@@ -18,13 +18,14 @@ use crate::assets::AssetBank;
 use crate::hardware::simulator::SimulatedHardware;
 use crate::hardware::{HardwareProvider, TelemetrySample, TrainerMode};
 use crate::physics::{compute_draft_factor, step_physics, PhysicsParams, RiderPhysicsState};
-use crate::renderer::{CameraMode, LigneClaireRenderer};
-use crate::ui::{draw_hud, HudState};
+use crate::renderer::{CameraMode, GraphicsSettings, LigneClaireRenderer};
+use crate::ui::{draw_ui, AppScreen, HudState};
 use crate::world::riders::{default_player_profile, spawn_ai_peloton, step_ai_peloton, AiRider, RiderProfile};
 use crate::world::terrain::{build_biome_world, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
 pub struct CadenceSim {
+    pub screen: AppScreen,
     pub biome: BiomeId,
     pub spline: RouteSpline,
     pub world_geo: StaticWorldGeometry,
@@ -33,6 +34,7 @@ pub struct CadenceSim {
     pub player_profile: RiderProfile,
     pub ai_riders: Vec<AiRider>,
     pub camera_mode: CameraMode,
+    pub graphics_settings: GraphicsSettings,
     pub sim_hw: SimulatedHardware,
     pub ble_hw: Option<Box<dyn HardwareProvider>>,
     pub use_simulator: bool,
@@ -43,6 +45,10 @@ pub struct CadenceSim {
 
 impl CadenceSim {
     pub fn new(biome: BiomeId, camera_mode: CameraMode) -> Self {
+        Self::new_with_screen(biome, AppScreen::InGame, camera_mode)
+    }
+
+    pub fn new_with_screen(biome: BiomeId, screen: AppScreen, camera_mode: CameraMode) -> Self {
         let spline = RouteSpline::for_biome(biome);
         let world_geo = build_biome_world(biome, &spline);
         let start_s = spline.sample(spline.hero_start_dist_m);
@@ -57,6 +63,11 @@ impl CadenceSim {
         );
         let player_profile = default_player_profile();
         let ai_riders = spawn_ai_peloton(spline.hero_start_dist_m, spline.total_length_m);
+        let eff_camera = if screen == AppScreen::InGame {
+            camera_mode
+        } else {
+            CameraMode::MainMenu
+        };
 
         #[cfg(all(not(target_arch = "wasm32"), feature = "ble"))]
         let ble_hw: Option<Box<dyn HardwareProvider>> = hardware::ble_native::NativeBleProvider::new()
@@ -69,6 +80,7 @@ impl CadenceSim {
         let ble_hw: Option<Box<dyn HardwareProvider>> = None;
 
         Self {
+            screen,
             biome,
             spline,
             world_geo,
@@ -76,7 +88,8 @@ impl CadenceSim {
             physics,
             player_profile,
             ai_riders,
-            camera_mode,
+            camera_mode: eff_camera,
+            graphics_settings: GraphicsSettings::default(),
             sim_hw: SimulatedHardware::default(),
             ble_hw,
             use_simulator: true,
@@ -87,13 +100,16 @@ impl CadenceSim {
     }
 
     pub fn switch_biome(&mut self, next: BiomeId, renderer: Option<(&wgpu::Device, &mut LigneClaireRenderer)>) {
-        if self.biome == next {
-            return;
+        let changed = self.biome != next;
+        if changed {
+            self.biome = next;
+            self.spline = RouteSpline::for_biome(next);
+            self.world_geo = build_biome_world(next, &self.spline);
+            self.physics_params.crr = next.crr();
+            if let Some((dev, ren)) = renderer {
+                ren.upload_world(dev, &self.world_geo);
+            }
         }
-        self.biome = next;
-        self.spline = RouteSpline::for_biome(next);
-        self.world_geo = build_biome_world(next, &self.spline);
-        self.physics_params.crr = next.crr();
         let start_s = self.spline.sample(self.spline.hero_start_dist_m);
         self.physics = RiderPhysicsState::new_hero_default(
             self.spline.hero_start_dist_m,
@@ -101,13 +117,37 @@ impl CadenceSim {
             start_s.grade_pct,
         );
         self.ai_riders = spawn_ai_peloton(self.spline.hero_start_dist_m, self.spline.total_length_m);
-        if let Some((dev, ren)) = renderer {
-            ren.upload_world(dev, &self.world_geo);
+    }
+
+    pub fn launch_world(&mut self, world: BiomeId, renderer: Option<(&wgpu::Device, &mut LigneClaireRenderer)>) {
+        self.switch_biome(world, renderer);
+        self.screen = AppScreen::InGame;
+        self.camera_mode = CameraMode::Chase;
+        self.hud_state.menu_open = false;
+    }
+
+    pub fn navigate_to(&mut self, next_screen: AppScreen, renderer: Option<(&wgpu::Device, &mut LigneClaireRenderer)>) {
+        let was_in_game = self.screen == AppScreen::InGame;
+        self.screen = next_screen;
+        self.hud_state.menu_open = false;
+        if next_screen == AppScreen::InGame {
+            if self.camera_mode == CameraMode::MainMenu {
+                self.camera_mode = CameraMode::Chase;
+            }
+        } else {
+            self.camera_mode = CameraMode::MainMenu;
+            if was_in_game && next_screen == AppScreen::MainMenu {
+                let random_bg = BiomeId::random();
+                self.switch_biome(random_bg, renderer);
+            }
         }
     }
 
     pub fn tick(&mut self, dt: f32) {
         self.time_s += dt;
+        if self.screen != AppScreen::InGame {
+            return;
+        }
         let sample = if self.use_simulator {
             self.sim_hw.poll_telemetry()
         } else if let Some(ble) = self.ble_hw.as_mut() {
@@ -193,7 +233,7 @@ struct WindowGpuState {
 }
 
 impl WindowGpuState {
-    async fn init(window: Arc<Window>, biome: BiomeId) -> Self {
+    async fn init(window: Arc<Window>, initial_level: Option<BiomeId>) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -226,7 +266,11 @@ impl WindowGpuState {
 
         let assets = AssetBank::load_embedded();
         let mut renderer = LigneClaireRenderer::new(&device, config.format, width, height, &assets);
-        let sim = CadenceSim::new(biome, CameraMode::Chase);
+        let (biome, screen, cam) = match initial_level {
+            Some(b) => (b, AppScreen::InGame, CameraMode::Chase),
+            None => (BiomeId::random(), AppScreen::MainMenu, CameraMode::MainMenu),
+        };
+        let sim = CadenceSim::new_with_screen(biome, screen, cam);
         renderer.upload_world(&device, &sim.world_geo);
 
         let egui_ctx = egui::Context::default();
@@ -273,9 +317,11 @@ impl WindowGpuState {
         let mut pending_actions = None;
         let mut full_output = self.egui_ctx.run_pass(raw_input, |ctx| {
             let ble_txt = self.sim.ble_status();
-            let act = draw_hud(
+            let act = draw_ui(
                 ctx,
+                self.sim.screen,
                 &mut self.sim.hud_state,
+                &mut self.sim.graphics_settings,
                 self.sim.biome,
                 &self.sim.spline,
                 &self.sim.last_telemetry,
@@ -294,11 +340,18 @@ impl WindowGpuState {
             .handle_platform_output(&self.window, full_output.platform_output);
 
         if let Some(act) = pending_actions {
-            if let Some(b) = act.cycle_biome {
-                self.sim.switch_biome(b, Some((&self.device, &mut self.renderer)));
+            if let Some(world) = act.launch_biome {
+                self.sim
+                    .launch_world(world, Some((&self.device, &mut self.renderer)));
+            }
+            if let Some(next_screen) = act.navigate_to {
+                self.sim
+                    .navigate_to(next_screen, Some((&self.device, &mut self.renderer)));
             }
             if let Some(c) = act.cycle_camera {
-                self.sim.camera_mode = c;
+                if self.sim.screen == AppScreen::InGame {
+                    self.sim.camera_mode = c;
+                }
             }
             if act.start_ble_scan {
                 self.sim.use_simulator = false;
@@ -368,6 +421,7 @@ impl WindowGpuState {
             &self.sim.player_profile,
             &self.sim.ai_riders,
             self.sim.camera_mode,
+            &self.sim.graphics_settings,
             self.sim.time_s,
             Some((&paint_jobs, &screen_desc)),
         );
@@ -382,9 +436,10 @@ impl WindowGpuState {
         #[cfg(not(target_arch = "wasm32"))]
         if self.save_screenshot_flag {
             self.save_screenshot_flag = false;
-            let _ = render_headless_screenshot(
+            let _ = render_headless_screenshot_screen(
                 "screenshots/capture.png",
                 self.sim.biome,
+                self.sim.screen,
                 self.config.width,
                 self.config.height,
                 self.sim.camera_mode,
@@ -395,7 +450,7 @@ impl WindowGpuState {
 
 struct CadenceApp {
     #[allow(dead_code)]
-    initial_biome: BiomeId,
+    initial_level: Option<BiomeId>,
     state: Option<WindowGpuState>,
 }
 
@@ -428,14 +483,12 @@ impl ApplicationHandler for CadenceApp {
         {
             self.state = Some(pollster::block_on(WindowGpuState::init(
                 window,
-                self.initial_biome,
+                self.initial_level,
             )));
         }
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Initialize synchronously via wasm-bindgen-futures isn't direct inside resumed;
-            // store via leaked Rc or spawn_local if needed, or run block-free pattern.
             let _ = window;
         }
     }
@@ -454,25 +507,38 @@ impl ApplicationHandler for CadenceApp {
             WindowEvent::KeyboardInput { event: kev, .. } if kev.state == ElementState::Pressed => {
                 if let PhysicalKey::Code(code) = kev.physical_key {
                     match code {
-                        KeyCode::Digit1 => st
-                            .sim
-                            .switch_biome(BiomeId::MountainClimb, Some((&st.device, &mut st.renderer))),
-                        KeyCode::Digit2 => st
-                            .sim
-                            .switch_biome(BiomeId::CoastalPromenade, Some((&st.device, &mut st.renderer))),
-                        KeyCode::Digit3 => st
-                            .sim
-                            .switch_biome(BiomeId::RollingRuralGravel, Some((&st.device, &mut st.renderer))),
-                        KeyCode::KeyC => st.sim.camera_mode = st.sim.camera_mode.next(),
-                        KeyCode::KeyM => st.sim.hud_state.menu_open = !st.sim.hud_state.menu_open,
-                        KeyCode::ArrowUp => {
+                        KeyCode::Escape => match st.sim.screen {
+                            AppScreen::WorldSelect
+                            | AppScreen::Settings
+                            | AppScreen::AvatarEditor => {
+                                st.sim.navigate_to(
+                                    AppScreen::MainMenu,
+                                    Some((&st.device, &mut st.renderer)),
+                                );
+                            }
+                            AppScreen::InGame => {
+                                st.sim.hud_state.menu_open = !st.sim.hud_state.menu_open;
+                            }
+                            AppScreen::MainMenu => {}
+                        },
+                        KeyCode::KeyC if st.sim.screen == AppScreen::InGame => {
+                            st.sim.camera_mode = st.sim.camera_mode.next();
+                        }
+                        KeyCode::KeyM if st.sim.screen == AppScreen::InGame => {
+                            st.sim.hud_state.menu_open = !st.sim.hud_state.menu_open;
+                        }
+                        KeyCode::ArrowUp if st.sim.screen == AppScreen::InGame => {
                             st.sim.sim_hw.target_power_w = (st.sim.sim_hw.target_power_w + 15.0).min(600.0);
                         }
-                        KeyCode::ArrowDown => {
+                        KeyCode::ArrowDown if st.sim.screen == AppScreen::InGame => {
                             st.sim.sim_hw.target_power_w = (st.sim.sim_hw.target_power_w - 15.0).max(40.0);
                         }
-                        KeyCode::ArrowRight => st.sim.sim_hw.shift_gear(1),
-                        KeyCode::ArrowLeft => st.sim.sim_hw.shift_gear(-1),
+                        KeyCode::ArrowRight if st.sim.screen == AppScreen::InGame => {
+                            st.sim.sim_hw.shift_gear(1);
+                        }
+                        KeyCode::ArrowLeft if st.sim.screen == AppScreen::InGame => {
+                            st.sim.sim_hw.shift_gear(-1);
+                        }
                         KeyCode::F12 => st.save_screenshot_flag = true,
                         _ => {}
                     }
@@ -493,11 +559,11 @@ impl ApplicationHandler for CadenceApp {
     }
 }
 
-pub fn run_windowed(biome: BiomeId) {
+pub fn run_windowed(initial_level: Option<BiomeId>) {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = CadenceApp {
-        initial_biome: biome,
+        initial_level,
         state: None,
     };
     let _ = event_loop.run_app(&mut app);
@@ -529,7 +595,7 @@ pub fn run_web() {
     let cell_clone = state_cell.clone();
     let win_clone = window.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let st = WindowGpuState::init(win_clone, BiomeId::MountainClimb).await;
+        let st = WindowGpuState::init(win_clone, None).await;
         *cell_clone.borrow_mut() = Some(st);
     });
 
@@ -579,7 +645,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
         .expect("android event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = CadenceApp {
-        initial_biome: BiomeId::MountainClimb,
+        initial_level: None,
         state: None,
     };
     let _ = event_loop.run_app(&mut app);
@@ -589,6 +655,18 @@ pub fn android_main(app: android_activity::AndroidApp) {
 pub fn render_headless_screenshot(
     out_path: &str,
     biome: BiomeId,
+    width: u32,
+    height: u32,
+    camera_mode: CameraMode,
+) -> Result<(), String> {
+    render_headless_screenshot_screen(out_path, biome, AppScreen::InGame, width, height, camera_mode)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_headless_screenshot_screen(
+    out_path: &str,
+    biome: BiomeId,
+    screen: AppScreen,
     width: u32,
     height: u32,
     camera_mode: CameraMode,
@@ -611,7 +689,7 @@ pub fn render_headless_screenshot(
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let assets = AssetBank::load_embedded();
     let mut renderer = LigneClaireRenderer::new(&device, format, width, height, &assets);
-    let mut sim = CadenceSim::new(biome, camera_mode);
+    let mut sim = CadenceSim::new_with_screen(biome, screen, camera_mode);
     renderer.upload_world(&device, &sim.world_geo);
 
     let out_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -645,9 +723,11 @@ pub fn render_headless_screenshot(
         };
         let mut full_out = egui_ctx.run_pass(raw_input, |ctx| {
             let ble_txt = sim.ble_status();
-            let _ = draw_hud(
+            let _ = draw_ui(
                 ctx,
+                sim.screen,
                 &mut sim.hud_state,
+                &mut sim.graphics_settings,
                 sim.biome,
                 &sim.spline,
                 &sim.last_telemetry,
@@ -689,6 +769,7 @@ pub fn render_headless_screenshot(
             &sim.player_profile,
             &sim.ai_riders,
             sim.camera_mode,
+            &sim.graphics_settings,
             sim.time_s,
             Some((&paint_jobs, &screen_desc)),
         );

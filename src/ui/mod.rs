@@ -9,13 +9,36 @@ use egui::{
 use crate::hardware::simulator::SimulatedHardware;
 use crate::hardware::TelemetrySample;
 use crate::physics::RiderPhysicsState;
-use crate::renderer::CameraMode;
+use crate::renderer::{CameraMode, GraphicsSettings};
 use crate::world::riders::{AiRider, RiderProfile};
 use crate::world::{BiomeId, RouteSpline};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppScreen {
+    MainMenu,
+    WorldSelect,
+    Settings,
+    AvatarEditor,
+    InGame,
+}
+
+impl AppScreen {
+    pub fn from_str_arg(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "menu" | "main_menu" | "mainmenu" => Some(AppScreen::MainMenu),
+            "world_select" | "worldselect" | "worlds" | "maps" => Some(AppScreen::WorldSelect),
+            "settings" => Some(AppScreen::Settings),
+            "gear" | "avatar" | "avatar_editor" => Some(AppScreen::AvatarEditor),
+            "game" | "in_game" | "ingame" | "ride" => Some(AppScreen::InGame),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HudActions {
-    pub cycle_biome: Option<BiomeId>,
+    pub navigate_to: Option<AppScreen>,
+    pub launch_biome: Option<BiomeId>,
     pub cycle_camera: Option<CameraMode>,
     pub request_screenshot: bool,
     pub start_ble_scan: bool,
@@ -714,7 +737,7 @@ pub fn draw_hud(
                 Color32::WHITE,
             );
 
-            // 5 circular inked parchment buttons
+            // 4 circular inked parchment buttons (no on-the-fly biome switching!)
             if draw_ink_button(ui, Pos2::new(w - 170.0, 38.0), 21.0, 0, "Toggle Help & Shortcuts (M)") {
                 hud_state.menu_open = !hud_state.menu_open;
             }
@@ -724,10 +747,7 @@ pub fn draw_hud(
             if draw_ink_button(ui, Pos2::new(w - 38.0, 38.0), 24.0, 2, "Cycle Camera Angle (C)") {
                 actions.cycle_camera = Some(camera_mode.next());
             }
-            if draw_ink_button(ui, Pos2::new(w - 38.0, 102.0), 24.0, 3, "Switch Biome Route (1/2/3)") {
-                actions.cycle_biome = Some(biome.next());
-            }
-            if draw_ink_button(ui, Pos2::new(w - 38.0, 166.0), 24.0, 4, "Settings & Trainer Menu (M)") {
+            if draw_ink_button(ui, Pos2::new(w - 38.0, 102.0), 24.0, 4, "Settings & Trainer Menu (M)") {
                 hud_state.menu_open = !hud_state.menu_open;
             }
         });
@@ -973,7 +993,7 @@ pub fn draw_hud(
                 });
         });
 
-    // 7. INTERACTIVE ACTION MENU / SIMULATOR / BLE / BIOME DRAWER
+    // 7. INTERACTIVE ACTION MENU / SIMULATOR / BLE DRAWER (no on-the-fly world switching)
     if hud_state.menu_open {
         egui::Window::new("Cadence Control & Trainer Hub")
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
@@ -981,17 +1001,14 @@ pub fn draw_hud(
             .resizable(false)
             .default_width(390.0)
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new("Route / Biome").strong());
                 ui.horizontal(|ui| {
-                    for b in [
-                        BiomeId::MountainClimb,
-                        BiomeId::CoastalPromenade,
-                        BiomeId::RollingRuralGravel,
-                    ] {
-                        if ui.selectable_label(biome == b, b.name()).clicked() {
-                            actions.cycle_biome = Some(b);
+                    ui.label(egui::RichText::new(format!("Active World: {}", biome.name())).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("End Ride / Main Menu").clicked() {
+                            hud_state.menu_open = false;
+                            actions.navigate_to = Some(AppScreen::MainMenu);
                         }
-                    }
+                    });
                 });
 
                 ui.separator();
@@ -1059,7 +1076,7 @@ pub fn draw_hud(
                     f.f_aero_n,
                     physics.draft_factor * 100.0
                 ));
-                ui.small("Hotkeys: 1/2/3 Biome · C Camera · M Menu · ↑/↓ Watts · ←/→ Gears · F12 Screenshot");
+                ui.small("Hotkeys: C Camera · M/Esc Menu · ↑/↓ Watts · ←/→ Gears · F12 Screenshot");
                 if ui.button("Close Menu").clicked() {
                     hud_state.menu_open = false;
                 }
@@ -1067,4 +1084,822 @@ pub fn draw_hud(
     }
 
     actions
+}
+
+fn draw_outlined_text(
+    p: &egui::Painter,
+    pos: Pos2,
+    align: Align2,
+    text: &str,
+    font: FontId,
+    fill: Color32,
+    outline: Color32,
+    thickness: f32,
+) {
+    let dirs = [
+        Vec2::new(-1.0, 0.0),
+        Vec2::new(1.0, 0.0),
+        Vec2::new(0.0, -1.0),
+        Vec2::new(0.0, 1.0),
+        Vec2::new(-0.707, -0.707),
+        Vec2::new(0.707, -0.707),
+        Vec2::new(-0.707, 0.707),
+        Vec2::new(0.707, 0.707),
+    ];
+    for d in dirs {
+        p.text(pos + d * thickness, align, text, font.clone(), outline);
+    }
+    p.text(pos, align, text, font, fill);
+}
+
+fn draw_double_outlined_title(
+    p: &egui::Painter,
+    pos: Pos2,
+    text: &str,
+    font_size: f32,
+    inner_fill: Color32,
+    mid_outline: Color32,
+    outer_ink: Color32,
+) {
+    let font = FontId::new(font_size, FontFamily::Proportional);
+    let r_outer = (font_size * 0.055).max(3.5);
+    let r_mid = (font_size * 0.032).max(2.0);
+    for i in 0..16 {
+        let a = (i as f32 / 16.0) * std::f32::consts::TAU;
+        let d = Vec2::new(a.cos(), a.sin());
+        p.text(pos + d * r_outer, Align2::CENTER_CENTER, text, font.clone(), outer_ink);
+    }
+    for i in 0..16 {
+        let a = (i as f32 / 16.0) * std::f32::consts::TAU;
+        let d = Vec2::new(a.cos(), a.sin());
+        p.text(pos + d * r_mid, Align2::CENTER_CENTER, text, font.clone(), mid_outline);
+    }
+    p.text(pos, Align2::CENTER_CENTER, text, font, inner_fill);
+}
+
+fn draw_menu_card_frame(p: &egui::Painter, rect: Rect, hovered: bool, corner: u8) {
+    let shadow_rect = rect.translate(Vec2::new(0.0, 6.0)).expand(2.0);
+    p.rect_filled(
+        shadow_rect,
+        CornerRadius::same(corner + 2),
+        Color32::from_black_alpha(115),
+    );
+    let fill = if hovered {
+        Color32::from_rgba_unmultiplied(48, 46, 38, 228)
+    } else {
+        Color32::from_rgba_unmultiplied(34, 34, 28, 214)
+    };
+    let outer_ink = Color32::from_rgba_unmultiplied(18, 16, 14, 235);
+    let inner_rim = if hovered {
+        Color32::from_rgba_unmultiplied(235, 224, 196, 215)
+    } else {
+        Color32::from_rgba_unmultiplied(168, 164, 148, 155)
+    };
+    p.rect(
+        rect,
+        CornerRadius::same(corner),
+        fill,
+        Stroke::new(2.2, outer_ink),
+        StrokeKind::Outside,
+    );
+    p.rect(
+        rect.shrink(1.5),
+        CornerRadius::same(corner.saturating_sub(1)),
+        Color32::TRANSPARENT,
+        Stroke::new(1.6, inner_rim),
+        StrokeKind::Inside,
+    );
+}
+
+fn draw_settings_cog_icon(p: &egui::Painter, center: Pos2, scale: f32) {
+    let ink = Color32::from_rgb(28, 24, 20);
+    let cream = Color32::from_rgb(236, 232, 222);
+    let inner_ring_col = Color32::from_rgb(184, 178, 166);
+    let hole_fill = Color32::from_rgb(44, 42, 36);
+
+    // Drop shadow
+    p.circle_filled(center + Vec2::new(0.0, 3.0 * scale), 26.0 * scale, Color32::from_black_alpha(95));
+
+    // 8 chunky rounded gear teeth
+    let teeth = 8;
+    let r_in = 16.5 * scale;
+    let r_out = 26.5 * scale;
+    let half_ang = 0.20_f32;
+    for i in 0..teeth {
+        let a = (i as f32 / teeth as f32) * std::f32::consts::TAU;
+        let a0 = a - half_ang;
+        let a1 = a + half_ang;
+        let a0_in = a - half_ang * 1.35;
+        let a1_in = a + half_ang * 1.35;
+        let pts = vec![
+            center + Vec2::new(a0_in.cos(), a0_in.sin()) * r_in,
+            center + Vec2::new(a0.cos(), a0.sin()) * r_out,
+            center + Vec2::new(a1.cos(), a1.sin()) * r_out,
+            center + Vec2::new(a1_in.cos(), a1_in.sin()) * r_in,
+        ];
+        p.add(Shape::convex_polygon(pts, cream, Stroke::new(2.0 * scale, ink)));
+    }
+
+    // Main gear wheel disc
+    p.circle(center, 19.5 * scale, cream, Stroke::new(2.2 * scale, ink));
+    // Inner recessed bevel ring
+    p.circle(center, 12.2 * scale, inner_ring_col, Stroke::new(1.5 * scale, ink));
+    // Center axle hole
+    p.circle(center, 7.6 * scale, hole_fill, Stroke::new(2.0 * scale, ink));
+}
+
+fn draw_jersey_gear_icon(p: &egui::Painter, center: Pos2, scale: f32) {
+    let ink = Color32::from_rgb(26, 22, 18);
+    let blue = Color32::from_rgb(72, 146, 206);
+    let red = Color32::from_rgb(214, 74, 68);
+    let yellow = Color32::from_rgb(242, 202, 74);
+    let collar_dark = Color32::from_rgb(54, 48, 44);
+
+    // Subtle drop shadow
+    p.circle_filled(center + Vec2::new(0.0, 4.0 * scale), 26.0 * scale, Color32::from_black_alpha(95));
+
+    // Left & right blue sleeves
+    let left_sleeve = vec![
+        center + Vec2::new(-14.0, -19.0) * scale,
+        center + Vec2::new(-27.0, -9.0) * scale,
+        center + Vec2::new(-23.0, 4.0) * scale,
+        center + Vec2::new(-15.0, 0.0) * scale,
+    ];
+    let right_sleeve = vec![
+        center + Vec2::new(14.0, -19.0) * scale,
+        center + Vec2::new(27.0, -9.0) * scale,
+        center + Vec2::new(23.0, 4.0) * scale,
+        center + Vec2::new(15.0, 0.0) * scale,
+    ];
+    p.add(Shape::convex_polygon(left_sleeve, blue, Stroke::new(2.0 * scale, ink)));
+    p.add(Shape::convex_polygon(right_sleeve, blue, Stroke::new(2.0 * scale, ink)));
+
+    // Golden-yellow sleeve cuff bands
+    let left_cuff = vec![
+        center + Vec2::new(-25.2, -4.0) * scale,
+        center + Vec2::new(-27.0, -9.0) * scale,
+        center + Vec2::new(-21.5, -13.0) * scale,
+        center + Vec2::new(-19.5, -7.5) * scale,
+    ];
+    let right_cuff = vec![
+        center + Vec2::new(25.2, -4.0) * scale,
+        center + Vec2::new(27.0, -9.0) * scale,
+        center + Vec2::new(21.5, -13.0) * scale,
+        center + Vec2::new(19.5, -7.5) * scale,
+    ];
+    p.add(Shape::convex_polygon(left_cuff, yellow, Stroke::new(1.6 * scale, ink)));
+    p.add(Shape::convex_polygon(right_cuff, yellow, Stroke::new(1.6 * scale, ink)));
+
+    // Main jersey torso (cobalt blue sides)
+    let torso_rect = Rect::from_center_size(
+        center + Vec2::new(0.0, 4.0 * scale),
+        Vec2::new(31.0 * scale, 44.0 * scale),
+    );
+    p.rect(
+        torso_rect,
+        CornerRadius::same((7.0 * scale) as u8),
+        blue,
+        Stroke::new(2.2 * scale, ink),
+        StrokeKind::Middle,
+    );
+
+    // Center coral-red vertical panel
+    let red_panel = Rect::from_center_size(
+        center + Vec2::new(0.0, 4.0 * scale),
+        Vec2::new(15.0 * scale, 43.0 * scale),
+    );
+    p.rect(
+        red_panel,
+        CornerRadius::same((4.0 * scale) as u8),
+        red,
+        Stroke::new(1.8 * scale, ink),
+        StrokeKind::Middle,
+    );
+
+    // Red shoulder yoke top
+    let yoke = Rect::from_center_size(
+        center + Vec2::new(0.0, -12.5 * scale),
+        Vec2::new(28.0 * scale, 10.0 * scale),
+    );
+    p.rect_filled(yoke, CornerRadius::same((4.0 * scale) as u8), red);
+    p.rect_stroke(
+        torso_rect,
+        CornerRadius::same((7.0 * scale) as u8),
+        Stroke::new(2.2 * scale, ink),
+        StrokeKind::Middle,
+    );
+
+    // Collar opening + full front zipper line
+    p.circle(
+        center + Vec2::new(0.0, -18.0 * scale),
+        5.5 * scale,
+        collar_dark,
+        Stroke::new(2.0 * scale, ink),
+    );
+    p.line_segment(
+        [
+            center + Vec2::new(0.0, -12.5 * scale),
+            center + Vec2::new(0.0, 25.5 * scale),
+        ],
+        Stroke::new(2.0 * scale, ink),
+    );
+    // Small dark zipper pull tab near chest
+    p.circle_filled(center + Vec2::new(0.0, -5.0 * scale), 2.3 * scale, ink);
+}
+
+fn draw_main_menu(ctx: &egui::Context) -> HudActions {
+    let mut actions = HudActions::default();
+    let screen = ctx.input(|i| i.content_rect());
+    let w = screen.width().max(640.0);
+    let h = screen.height().max(480.0);
+    let scale_x = (w / 1280.0).clamp(0.65, 1.6);
+    let scale_y = (h / 960.0).clamp(0.65, 1.6);
+    let scale = scale_x.min(scale_y);
+
+    egui::Area::new(egui::Id::unique("cadence_main_menu_cluster"))
+        .fade_in(false)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, Sense::hover());
+
+            let x_left = 74.0 * scale_x;
+            let y_top = 246.0 * scale_y;
+            let ride_w = 456.0 * scale_x;
+            let ride_h = 200.0 * scale_y;
+            let ride_rect = Rect::from_min_size(Pos2::new(x_left, y_top), Vec2::new(ride_w, ride_h));
+
+            let sub_gap_x = 26.0 * scale_x;
+            let sub_gap_y = 44.0 * scale_y;
+            let sub_w = (ride_w - sub_gap_x) * 0.5;
+            let sub_h = 114.0 * scale_y;
+            let sub_y = ride_rect.max.y + sub_gap_y;
+
+            let settings_rect = Rect::from_min_size(Pos2::new(x_left, sub_y), Vec2::new(sub_w, sub_h));
+            let gear_rect = Rect::from_min_size(
+                Pos2::new(x_left + sub_w + sub_gap_x, sub_y),
+                Vec2::new(sub_w, sub_h),
+            );
+
+            let ride_resp = ui.interact(ride_rect, ui.scope_id().with("btn_main_ride"), Sense::click());
+            let settings_resp = ui.interact(
+                settings_rect.expand2(Vec2::new(0.0, 22.0 * scale_y)),
+                ui.scope_id().with("btn_main_settings"),
+                Sense::click(),
+            );
+            let gear_resp = ui.interact(
+                gear_rect.expand2(Vec2::new(0.0, 22.0 * scale_y)),
+                ui.scope_id().with("btn_main_gear"),
+                Sense::click(),
+            );
+
+            let p = ui.painter();
+
+            // 1. Large top "RIDE" card
+            draw_menu_card_frame(&p, ride_rect, ride_resp.hovered(), (18.0 * scale) as u8);
+            draw_double_outlined_title(
+                &p,
+                ride_rect.center() + Vec2::new(0.0, 2.0 * scale_y),
+                "RIDE",
+                108.0 * scale,
+                Color32::from_rgb(36, 36, 30),
+                Color32::from_rgb(245, 242, 234),
+                Color32::from_rgb(20, 18, 16),
+            );
+
+            // 2. Bottom-left "SETTINGS" card + straddling cog icon
+            draw_menu_card_frame(&p, settings_rect, settings_resp.hovered(), (16.0 * scale) as u8);
+            draw_settings_cog_icon(
+                &p,
+                Pos2::new(settings_rect.center().x, settings_rect.min.y + 3.0 * scale_y),
+                scale,
+            );
+            draw_outlined_text(
+                &p,
+                Pos2::new(settings_rect.center().x, settings_rect.min.y + 68.0 * scale_y),
+                Align2::CENTER_CENTER,
+                "SETTINGS",
+                FontId::new(31.0 * scale, FontFamily::Proportional),
+                Color32::from_rgb(244, 240, 232),
+                Color32::from_rgb(22, 20, 16),
+                2.0 * scale,
+            );
+
+            // 3. Bottom-right "GEAR" card + straddling color-blocked jersey icon
+            draw_menu_card_frame(&p, gear_rect, gear_resp.hovered(), (16.0 * scale) as u8);
+            draw_jersey_gear_icon(
+                &p,
+                Pos2::new(gear_rect.center().x, gear_rect.min.y + 3.0 * scale_y),
+                scale,
+            );
+            draw_outlined_text(
+                &p,
+                Pos2::new(gear_rect.center().x, gear_rect.min.y + 68.0 * scale_y),
+                Align2::CENTER_CENTER,
+                "GEAR",
+                FontId::new(31.0 * scale, FontFamily::Proportional),
+                Color32::from_rgb(244, 240, 232),
+                Color32::from_rgb(22, 20, 16),
+                2.0 * scale,
+            );
+
+            if ride_resp.clicked() {
+                actions.navigate_to = Some(AppScreen::WorldSelect);
+            }
+            if settings_resp.clicked() {
+                actions.navigate_to = Some(AppScreen::Settings);
+            }
+            if gear_resp.clicked() {
+                actions.navigate_to = Some(AppScreen::AvatarEditor);
+            }
+        });
+
+    actions
+}
+
+fn draw_back_pill(ui: &mut Ui, pos: Pos2, scale: f32) -> bool {
+    let rect = Rect::from_min_size(pos, Vec2::new(138.0 * scale, 46.0 * scale));
+    let resp = ui.interact(rect, ui.scope_id().with("menu_back_pill"), Sense::click());
+    let p = ui.painter();
+    draw_menu_card_frame(&p, rect, resp.hovered(), (12.0 * scale) as u8);
+    draw_outlined_text(
+        &p,
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "BACK",
+        FontId::new(21.0 * scale, FontFamily::Proportional),
+        Color32::from_rgb(244, 240, 232),
+        Color32::from_rgb(22, 20, 16),
+        1.8 * scale,
+    );
+    resp.clicked()
+}
+
+fn draw_world_preview_banner(p: &egui::Painter, rect: Rect, biome: BiomeId) {
+    let ink = Color32::from_rgb(32, 28, 22);
+    match biome {
+        BiomeId::MountainClimb => {
+            p.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(174, 198, 212));
+            // Distant mountain ridge
+            p.add(Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.min.x, rect.max.y - 25.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.28, rect.min.y + 22.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.58, rect.min.y + 44.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.84, rect.min.y + 16.0),
+                    Pos2::new(rect.max.x, rect.min.y + 38.0),
+                    Pos2::new(rect.max.x, rect.max.y),
+                    Pos2::new(rect.min.x, rect.max.y),
+                ],
+                Color32::from_rgb(138, 126, 108),
+                Stroke::new(1.8, ink),
+            ));
+            // Green alpine slope & winding road
+            p.add(Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.min.x, rect.max.y - 34.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.52, rect.max.y - 54.0),
+                    Pos2::new(rect.max.x, rect.max.y - 22.0),
+                    Pos2::new(rect.max.x, rect.max.y),
+                    Pos2::new(rect.min.x, rect.max.y),
+                ],
+                Color32::from_rgb(134, 158, 94),
+                Stroke::new(1.8, ink),
+            ));
+        }
+        BiomeId::CoastalPromenade => {
+            p.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(244, 168, 82));
+            // Glowing setting sun disc
+            p.circle_filled(
+                Pos2::new(rect.min.x + rect.width() * 0.76, rect.min.y + rect.height() * 0.52),
+                24.0,
+                Color32::from_rgb(254, 232, 142),
+            );
+            // Sunset ocean water
+            let sea = Rect::from_min_max(
+                Pos2::new(rect.min.x, rect.min.y + rect.height() * 0.56),
+                rect.max,
+            );
+            p.rect_filled(sea, CornerRadius::same(8), Color32::from_rgb(92, 138, 156));
+            // Promenade seawall & road on left
+            p.add(Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.min.x, rect.min.y + rect.height() * 0.48),
+                    Pos2::new(rect.min.x + rect.width() * 0.56, rect.min.y + rect.height() * 0.58),
+                    Pos2::new(rect.min.x + rect.width() * 0.44, rect.max.y),
+                    Pos2::new(rect.min.x, rect.max.y),
+                ],
+                Color32::from_rgb(198, 166, 124),
+                Stroke::new(1.8, ink),
+            ));
+        }
+        BiomeId::RollingRuralGravel => {
+            p.rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(194, 212, 220));
+            // Rolling golden-green hills
+            p.add(Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.min.x, rect.min.y + 48.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.35, rect.min.y + 28.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.72, rect.min.y + 38.0),
+                    Pos2::new(rect.max.x, rect.min.y + 24.0),
+                    Pos2::new(rect.max.x, rect.max.y),
+                    Pos2::new(rect.min.x, rect.max.y),
+                ],
+                Color32::from_rgb(156, 174, 102),
+                Stroke::new(1.8, ink),
+            ));
+            p.add(Shape::convex_polygon(
+                vec![
+                    Pos2::new(rect.min.x, rect.max.y - 26.0),
+                    Pos2::new(rect.min.x + rect.width() * 0.48, rect.max.y - 44.0),
+                    Pos2::new(rect.max.x, rect.max.y - 24.0),
+                    Pos2::new(rect.max.x, rect.max.y),
+                    Pos2::new(rect.min.x, rect.max.y),
+                ],
+                Color32::from_rgb(206, 182, 134),
+                Stroke::new(1.8, ink),
+            ));
+        }
+    }
+    p.rect_stroke(
+        rect,
+        CornerRadius::same(10),
+        Stroke::new(2.0, ink),
+        StrokeKind::Inside,
+    );
+}
+
+fn draw_world_select(ctx: &egui::Context) -> HudActions {
+    let mut actions = HudActions::default();
+    let screen = ctx.input(|i| i.content_rect());
+    let w = screen.width().max(640.0);
+    let h = screen.height().max(480.0);
+    let scale_x = (w / 1280.0).clamp(0.65, 1.6);
+    let scale_y = (h / 960.0).clamp(0.65, 1.6);
+    let scale = scale_x.min(scale_y);
+
+    egui::Area::new(egui::Id::unique("cadence_world_select"))
+        .fade_in(false)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, Sense::hover());
+            let p = ui.painter().clone();
+
+            // Subtle backdrop tint so cards pop cleanly over the live 3D world
+            p.rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(75));
+
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+                actions.navigate_to = Some(AppScreen::MainMenu);
+            }
+
+            draw_double_outlined_title(
+                &p,
+                Pos2::new(w * 0.5, 62.0 * scale_y),
+                "SELECT WORLD",
+                52.0 * scale,
+                Color32::from_rgb(36, 36, 30),
+                Color32::from_rgb(245, 242, 234),
+                Color32::from_rgb(20, 18, 16),
+            );
+
+            let card_w = 356.0 * scale_x;
+            let card_h = 540.0 * scale_y;
+            let gap_x = 34.0 * scale_x;
+            let total_w = card_w * 3.0 + gap_x * 2.0;
+            let start_x = (w - total_w) * 0.5;
+            let start_y = (h - card_h) * 0.5 + 24.0 * scale_y;
+
+            for (idx, biome) in BiomeId::ALL.iter().copied().enumerate() {
+                let cx = start_x + idx as f32 * (card_w + gap_x);
+                let card_rect = Rect::from_min_size(Pos2::new(cx, start_y), Vec2::new(card_w, card_h));
+                let resp = ui.interact(
+                    card_rect,
+                    ui.scope_id().with(("world_select_card", idx)),
+                    Sense::click(),
+                );
+                let p = ui.painter();
+                draw_menu_card_frame(&p, card_rect, resp.hovered(), (18.0 * scale) as u8);
+
+                // Top landscape banner
+                let banner_rect = Rect::from_min_size(
+                    Pos2::new(card_rect.min.x + 16.0 * scale_x, card_rect.min.y + 16.0 * scale_y),
+                    Vec2::new(card_w - 32.0 * scale_x, 148.0 * scale_y),
+                );
+                draw_world_preview_banner(&p, banner_rect, biome);
+
+                // World Name & Subtitle
+                draw_outlined_text(
+                    &p,
+                    Pos2::new(card_rect.center().x, banner_rect.max.y + 32.0 * scale_y),
+                    Align2::CENTER_CENTER,
+                    biome.name(),
+                    FontId::new(27.0 * scale, FontFamily::Proportional),
+                    Color32::from_rgb(246, 242, 232),
+                    Color32::from_rgb(20, 18, 14),
+                    2.0 * scale,
+                );
+                p.text(
+                    Pos2::new(card_rect.center().x, banner_rect.max.y + 60.0 * scale_y),
+                    Align2::CENTER_CENTER,
+                    biome.subtitle(),
+                    FontId::new(14.0 * scale, FontFamily::Proportional),
+                    Color32::from_rgb(206, 200, 186),
+                );
+
+                // 3 Stat badges
+                let (len_lbl, grade_lbl, surf_lbl) = biome.stats_summary();
+                let badges = [len_lbl, grade_lbl, surf_lbl];
+                let bw = (card_w - 44.0 * scale_x) / 3.0;
+                for (bi, &btxt) in badges.iter().enumerate() {
+                    let br = Rect::from_min_size(
+                        Pos2::new(
+                            card_rect.min.x + 16.0 * scale_x + bi as f32 * (bw + 6.0 * scale_x),
+                            banner_rect.max.y + 82.0 * scale_y,
+                        ),
+                        Vec2::new(bw, 26.0 * scale_y),
+                    );
+                    p.rect(
+                        br,
+                        CornerRadius::same(6),
+                        Color32::from_rgba_unmultiplied(56, 54, 46, 230),
+                        Stroke::new(1.2, Color32::from_rgba_unmultiplied(178, 172, 156, 140)),
+                        StrokeKind::Inside,
+                    );
+                    p.text(
+                        br.center(),
+                        Align2::CENTER_CENTER,
+                        btxt,
+                        FontId::new(10.5 * scale, FontFamily::Proportional),
+                        Color32::from_rgb(238, 232, 218),
+                    );
+                }
+
+                // Route Elevation Sparkline Box
+                let graph_box = Rect::from_min_size(
+                    Pos2::new(card_rect.min.x + 18.0 * scale_x, banner_rect.max.y + 124.0 * scale_y),
+                    Vec2::new(card_w - 36.0 * scale_x, 128.0 * scale_y),
+                );
+                p.rect(
+                    graph_box,
+                    CornerRadius::same(10),
+                    Color32::from_rgba_unmultiplied(24, 26, 24, 195),
+                    Stroke::new(1.2, Color32::from_rgba_unmultiplied(142, 138, 124, 120)),
+                    StrokeKind::Inside,
+                );
+                let sp = RouteSpline::for_biome(biome);
+                let n_pts = 48usize;
+                let mut min_e = f32::MAX;
+                let mut max_e = f32::MIN;
+                let mut samples = Vec::with_capacity(n_pts);
+                for k in 0..n_pts {
+                    let dist = (k as f32 / (n_pts - 1) as f32) * sp.total_length_m;
+                    let s = sp.sample(dist);
+                    min_e = min_e.min(s.pos.y);
+                    max_e = max_e.max(s.pos.y);
+                    samples.push((s.pos.y, s.grade_pct));
+                }
+                let span_e = (max_e - min_e).max(6.0);
+                let mut line_pts = Vec::with_capacity(n_pts);
+                let mut mesh = Mesh::default();
+                let inner_g = graph_box.shrink2(Vec2::new(10.0 * scale_x, 14.0 * scale_y));
+                for (k, &(ey, gr)) in samples.iter().enumerate() {
+                    let t = k as f32 / (n_pts - 1) as f32;
+                    let nh = ((ey - min_e) / span_e).clamp(0.12, 0.92);
+                    let gx = inner_g.min.x + t * inner_g.width();
+                    let gy = inner_g.max.y - nh * inner_g.height();
+                    line_pts.push((Pos2::new(gx, gy), grade_to_color(gr)));
+                }
+                for k in 0..(n_pts - 1) {
+                    let (p0, c0) = line_pts[k];
+                    let (p1, c1) = line_pts[k + 1];
+                    let b0 = Pos2::new(p0.x, inner_g.max.y);
+                    let b1 = Pos2::new(p1.x, inner_g.max.y);
+                    let base = mesh.vertices.len() as u32;
+                    mesh.vertices.push(Vertex { pos: p0, uv: Pos2::ZERO, color: c0 });
+                    mesh.vertices.push(Vertex { pos: p1, uv: Pos2::ZERO, color: c1 });
+                    mesh.vertices.push(Vertex { pos: b1, uv: Pos2::ZERO, color: c1 });
+                    mesh.vertices.push(Vertex { pos: b0, uv: Pos2::ZERO, color: c0 });
+                    mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+                p.add(Shape::mesh(mesh));
+
+                // Launch CTA pill at bottom of card
+                let btn_rect = Rect::from_min_size(
+                    Pos2::new(card_rect.min.x + 24.0 * scale_x, card_rect.max.y - 68.0 * scale_y),
+                    Vec2::new(card_w - 48.0 * scale_x, 48.0 * scale_y),
+                );
+                let btn_fill = if resp.hovered() {
+                    Color32::from_rgb(218, 96, 62)
+                } else {
+                    Color32::from_rgb(66, 138, 178)
+                };
+                p.rect(
+                    btn_rect,
+                    CornerRadius::same(10),
+                    btn_fill,
+                    Stroke::new(2.0, Color32::from_rgb(24, 20, 16)),
+                    StrokeKind::Inside,
+                );
+                draw_outlined_text(
+                    &p,
+                    btn_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "RIDE WORLD",
+                    FontId::new(21.0 * scale, FontFamily::Proportional),
+                    Color32::WHITE,
+                    Color32::from_rgb(22, 18, 14),
+                    1.6 * scale,
+                );
+
+                if resp.clicked() {
+                    actions.launch_biome = Some(biome);
+                }
+            }
+        });
+
+    actions
+}
+
+fn draw_settings_screen(
+    ctx: &egui::Context,
+    graphics: &mut GraphicsSettings,
+    sim: &mut SimulatedHardware,
+    using_sim: bool,
+    ble_status: &str,
+) -> HudActions {
+    let mut actions = HudActions::default();
+    let screen = ctx.input(|i| i.content_rect());
+    let w = screen.width().max(640.0);
+    let h = screen.height().max(480.0);
+    let scale_x = (w / 1280.0).clamp(0.65, 1.6);
+    let scale_y = (h / 960.0).clamp(0.65, 1.6);
+    let scale = scale_x.min(scale_y);
+
+    egui::Area::new(egui::Id::unique("cadence_settings_backdrop"))
+        .fade_in(false)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, Sense::hover());
+            let p = ui.painter().clone();
+            p.rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(85));
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+                actions.navigate_to = Some(AppScreen::MainMenu);
+            }
+            draw_double_outlined_title(
+                &p,
+                Pos2::new(w * 0.5, 62.0 * scale_y),
+                "SETTINGS",
+                52.0 * scale,
+                Color32::from_rgb(36, 36, 30),
+                Color32::from_rgb(245, 242, 234),
+                Color32::from_rgb(20, 18, 16),
+            );
+        });
+
+    egui::Window::new("Game & Graphics Settings")
+        .anchor(Align2::CENTER_CENTER, Vec2::new(0.0, 20.0 * scale_y))
+        .collapsible(false)
+        .resizable(false)
+        .title_bar(false)
+        .fixed_size(Vec2::new(720.0 * scale_x, 460.0 * scale_y))
+        .frame(
+            egui::Frame::NONE
+                .fill(Color32::from_rgba_unmultiplied(34, 34, 28, 235))
+                .corner_radius(CornerRadius::same(16))
+                .stroke(Stroke::new(2.0, Color32::from_rgba_unmultiplied(178, 172, 156, 175)))
+                .inner_margin(egui::Margin::symmetric(28, 24)),
+        )
+        .show(ctx, |ui| {
+            ui.columns(2, |cols| {
+                // Column 0: Graphics Settings
+                cols[0].heading(egui::RichText::new("Graphics & Rendering").color(Color32::WHITE).strong());
+                cols[0].add_space(10.0);
+                cols[0].label(egui::RichText::new("Ligne Claire Ink Outline Weight").color(Color32::from_rgb(224, 218, 206)));
+                cols[0].add(egui::Slider::new(&mut graphics.outline_scale, 0.25..=1.75).text("Scale"));
+                cols[0].add_space(8.0);
+                cols[0].label(egui::RichText::new("Scenery & Prop Draw Distance").color(Color32::from_rgb(224, 218, 206)));
+                cols[0].add(egui::Slider::new(&mut graphics.prop_draw_distance_m, 250.0..=900.0).text("Meters"));
+                cols[0].add_space(8.0);
+                cols[0].label(egui::RichText::new("Camera Field of View Offset").color(Color32::from_rgb(224, 218, 206)));
+                cols[0].add(egui::Slider::new(&mut graphics.fov_offset_deg, -10.0..=10.0).text("Degrees"));
+                cols[0].add_space(10.0);
+                cols[0].checkbox(&mut graphics.shadows_enabled, "Enable Directional Sun Shadows (2048x2048)");
+                cols[0].add_space(16.0);
+                if cols[0].button("Reset Graphics Defaults").clicked() {
+                    *graphics = GraphicsSettings::default();
+                }
+
+                // Column 1: Game & Smart Trainer Settings
+                cols[1].heading(egui::RichText::new("Game & Trainer Hardware").color(Color32::WHITE).strong());
+                cols[1].add_space(10.0);
+                cols[1].horizontal(|ui| {
+                    if ui.selectable_label(using_sim, "Built-in Simulator").clicked() {
+                        actions.use_simulator = true;
+                    }
+                    if ui.button("Scan & Connect BLE").clicked() {
+                        actions.start_ble_scan = true;
+                    }
+                    if !using_sim && ui.button("Disconnect").clicked() {
+                        actions.disconnect_ble = true;
+                    }
+                });
+                cols[1].small(egui::RichText::new(format!("Status: {ble_status}")).color(Color32::from_rgb(200, 196, 184)));
+                cols[1].add_space(10.0);
+                cols[1].add(egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0).text("Rider Weight (kg)"));
+                cols[1].add(egui::Slider::new(&mut sim.target_power_w, 40.0..=600.0).text("Sim Power (W)"));
+                cols[1].add(egui::Slider::new(&mut sim.target_cadence_rpm, 35.0..=130.0).text("Sim Cadence (RPM)"));
+                cols[1].add(egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0).text("Sim Heart Rate (BPM)"));
+                cols[1].add_space(6.0);
+                cols[1].horizontal(|ui| {
+                    ui.label(format!("Virtual Gear: {}", sim.gear));
+                    if ui.button(" - ").clicked() {
+                        sim.shift_gear(-1);
+                    }
+                    if ui.button(" + ").clicked() {
+                        sim.shift_gear(1);
+                    }
+                    ui.checkbox(&mut sim.erg_mode, "ERG Mode");
+                    ui.checkbox(&mut sim.micro_variation, "Live Noise");
+                });
+                if sim.erg_mode {
+                    let mut erg_w = sim.erg_target_w as f32;
+                    if cols[1].add(egui::Slider::new(&mut erg_w, 60.0..=500.0).text("ERG Target (W)")).changed() {
+                        sim.erg_target_w = erg_w as u16;
+                    }
+                }
+            });
+
+            ui.add_space(18.0);
+            ui.separator();
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Back to Main Menu").clicked() {
+                    actions.navigate_to = Some(AppScreen::MainMenu);
+                }
+            });
+        });
+
+    actions
+}
+
+fn draw_avatar_editor_screen(ctx: &egui::Context) -> HudActions {
+    let mut actions = HudActions::default();
+    let screen = ctx.input(|i| i.content_rect());
+    let w = screen.width().max(640.0);
+    let h = screen.height().max(480.0);
+    let scale_x = (w / 1280.0).clamp(0.65, 1.6);
+    let scale_y = (h / 960.0).clamp(0.65, 1.6);
+    let scale = scale_x.min(scale_y);
+
+    // Left blank as requested ("Gear opens the avatar editor screen. For now leave the avatar editor screen blank.")
+    // with only a discrete Back button in the top-left corner so the player can return to the Main Menu.
+    egui::Area::new(egui::Id::unique("cadence_avatar_editor_blank"))
+        .fade_in(false)
+        .fixed_pos(Pos2::ZERO)
+        .show(ctx, |ui| {
+            let _ = ui.allocate_rect(screen, Sense::hover());
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+                actions.navigate_to = Some(AppScreen::MainMenu);
+            }
+        });
+
+    actions
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn draw_ui(
+    ctx: &egui::Context,
+    screen_mode: AppScreen,
+    hud_state: &mut HudState,
+    graphics: &mut GraphicsSettings,
+    biome: BiomeId,
+    spline: &RouteSpline,
+    telemetry: &TelemetrySample,
+    physics: &RiderPhysicsState,
+    player_profile: &RiderProfile,
+    ai_riders: &[AiRider],
+    sim: &mut SimulatedHardware,
+    using_sim: bool,
+    ble_status: &str,
+    camera_mode: CameraMode,
+) -> HudActions {
+    match screen_mode {
+        AppScreen::MainMenu => draw_main_menu(ctx),
+        AppScreen::WorldSelect => draw_world_select(ctx),
+        AppScreen::Settings => draw_settings_screen(ctx, graphics, sim, using_sim, ble_status),
+        AppScreen::AvatarEditor => draw_avatar_editor_screen(ctx),
+        AppScreen::InGame => draw_hud(
+            ctx,
+            hud_state,
+            biome,
+            spline,
+            telemetry,
+            physics,
+            player_profile,
+            ai_riders,
+            sim,
+            using_sim,
+            ble_status,
+            camera_mode,
+        ),
+    }
 }

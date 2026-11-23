@@ -32,6 +32,12 @@ pub struct AiRider {
     pub lean_angle_rad: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiderPoseMode {
+    Pedaling,
+    MenuStopped,
+}
+
 #[derive(Debug, Clone)]
 pub struct RiderPartDraw {
     pub model: ModelId,
@@ -138,6 +144,7 @@ pub fn build_rider_draw_parts(
     crank_angle_rad: f32,
     lean_angle_rad: f32,
     time_s: f32,
+    pose_mode: RiderPoseMode,
     profile: &RiderProfile,
     base_object_id: u32,
     out: &mut Vec<RiderPartDraw>,
@@ -149,12 +156,27 @@ pub fn build_rider_draw_parts(
     let z_back = (-s.tangent).normalize_or_zero();
     let x_right = s.up.cross(z_back).normalize_or_zero();
     let y_up = z_back.cross(x_right).normalize_or_zero();
+
+    let (yaw_rot, eff_lean_rad, eff_wheel_rad, eff_crank_rad) = match pose_mode {
+        RiderPoseMode::Pedaling => (0.0_f32, lean_angle_rad, wheel_angle_rad, crank_angle_rad),
+        RiderPoseMode::MenuStopped => (
+            // Rotate rider ~138 deg so front wheel points toward bottom-right and right drivetrain side faces the camera
+            -2.40_f32,
+            -0.085_f32,
+            0.0_f32,
+            // Negative crank angle puts the right pedal at the top-forward position (knee bent high)
+            // while the left leg extends straight down to touch the pavement!
+            -1.08_f32,
+        ),
+    };
+
     let basis = Mat4::from_cols(
         x_right.extend(0.0),
         y_up.extend(0.0),
         z_back.extend(0.0),
         world_pos.extend(1.0),
-    ) * Mat4::from_rotation_z(-lean_angle_rad);
+    ) * Mat4::from_rotation_y(yaw_rot)
+        * Mat4::from_rotation_z(-eff_lean_rad);
 
     let push_skinned = |out: &mut Vec<RiderPartDraw>,
                         model: ModelId,
@@ -184,44 +206,66 @@ pub fn build_rider_draw_parts(
     push(out, ModelId::BikeFrame, Mat4::IDENTITY, 0);
 
     // Wheels share distinct id +1 (Blender rear (0, -0.475, 0.340), front (0, +0.465, 0.340) -> wgpu (0, 0.340, +0.475 / -0.465))
-    let wheel_rot = Mat4::from_rotation_x(-wheel_angle_rad);
+    let wheel_rot = Mat4::from_rotation_x(-eff_wheel_rad);
     push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, 0.475)) * wheel_rot, 1);
     push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, -0.465)) * wheel_rot, 1);
 
     // Bottom bracket: Blender (0, -0.070, 0.275) -> wgpu (0, 0.275, 0.070)
-    let crank_rot = Mat4::from_rotation_x(-crank_angle_rad);
+    let crank_rot = Mat4::from_rotation_x(-eff_crank_rad);
     push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.070)) * crank_rot, 0);
 
     // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430, l2 = 0.415)
-    let hip_center = Vec3::new(0.0, 0.965, 0.235);
+    let hip_y = match pose_mode {
+        RiderPoseMode::Pedaling => 0.965_f32,
+        RiderPoseMode::MenuStopped => 0.905_f32,
+    };
+    let hip_center = Vec3::new(0.0, hip_y, 0.235);
     let l1 = 0.430_f32;
     let l2 = 0.415_f32;
-    let solve_leg_angles = |side: f32, theta_off: f32| -> [f32; 3] {
-        let th = crank_angle_rad + theta_off;
-        let hip = Vec3::new(side * 0.105, 0.965, 0.235);
-        let pedal = Vec3::new(
-            side * 0.118,
-            0.275 - 0.165 * th.sin(),
-            0.070 - 0.165 * th.cos(),
-        );
-        let ankle = pedal + Vec3::new(0.0, 0.056, 0.035);
+    let solve_ik_target = |hip: Vec3, ankle: Vec3, foot_ang: f32| -> [f32; 3] {
         let d_vec = ankle - hip;
-        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.004);
+        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.002);
         let base_ang = (-d_vec.z).atan2(-d_vec.y);
         let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
         let thigh_ang = base_ang + cos_a.acos();
         let knee = hip + Vec3::new(0.0, -l1 * thigh_ang.cos(), -l1 * thigh_ang.sin());
         let calf_vec = ankle - knee;
         let calf_ang = (-calf_vec.z).atan2(-calf_vec.y);
-        let foot_ang = 0.10 * th.cos();
         [thigh_ang, calf_ang, foot_ang]
     };
+    let solve_leg_angles = |side: f32, theta_off: f32| -> [f32; 3] {
+        let th = eff_crank_rad + theta_off;
+        let hip = Vec3::new(side * 0.105, hip_y, 0.235);
+        let pedal = Vec3::new(
+            side * 0.118,
+            0.275 - 0.165 * th.sin(),
+            0.070 - 0.165 * th.cos(),
+        );
+        let ankle = pedal + Vec3::new(0.0, 0.056, 0.035);
+        let foot_ang = 0.10 * th.cos();
+        solve_ik_target(hip, ankle, foot_ang)
+    };
     let ang_r = solve_leg_angles(1.0, 0.0);
-    let ang_l = solve_leg_angles(-1.0, std::f32::consts::PI);
+    let ang_l = match pose_mode {
+        RiderPoseMode::Pedaling => solve_leg_angles(-1.0, std::f32::consts::PI),
+        RiderPoseMode::MenuStopped => {
+            // Left leg extended straight down past the bottom bracket with shoe planted flat on the ground!
+            let hip_l = Vec3::new(-0.105, hip_y, 0.235);
+            let ground_ankle_l = Vec3::new(-0.140, 0.066, 0.105);
+            solve_ik_target(hip_l, ground_ankle_l, 0.02)
+        }
+    };
 
     // Continuous pedaling + idle breathing/sway animation phase for torso, shoulders, elbows, and neck/head!
     let rider_seed = (base_object_id as f32) * 0.37;
-    let anim_phase = crank_angle_rad + time_s * 1.8 + rider_seed;
+    let anim_phase = match pose_mode {
+        RiderPoseMode::Pedaling => eff_crank_rad + time_s * 1.8 + rider_seed,
+        RiderPoseMode::MenuStopped => time_s * 1.15 + rider_seed,
+    };
+    let motion_scale = match pose_mode {
+        RiderPoseMode::Pedaling => 1.0_f32,
+        RiderPoseMode::MenuStopped => 0.45_f32,
+    };
 
     // Unified seamless skinned cyclist body + shorts + thighs + knees + calves + shoes (id +2)
     push_skinned(
@@ -248,13 +292,13 @@ pub fn build_rider_draw_parts(
     let head_sway_x = 0.011 * anim_phase.sin();
     let head_bob_y  = 0.0076 * (anim_phase * 2.0).sin() + 0.0042 * (anim_phase * 0.85).cos();
     let head_fwd_z  = -0.006 * (anim_phase * 2.0).sin();
-    let head_yaw    = 0.055 * (time_s * 0.85 + rider_seed).sin() + 0.024 * anim_phase.cos() - lean_angle_rad * 0.30;
-    let head_pitch  = 0.032 * (anim_phase * 2.0).cos() + 0.019 * (time_s * 1.5 + rider_seed).sin();
-    let head_roll   = -0.036 * anim_phase.sin() + 0.015 * (time_s * 1.2 + rider_seed).cos();
+    let head_yaw    = (0.055 * (time_s * 0.85 + rider_seed).sin() + 0.024 * anim_phase.cos() - eff_lean_rad * 0.30) * motion_scale;
+    let head_pitch  = (0.032 * (anim_phase * 2.0).cos() + 0.019 * (time_s * 1.5 + rider_seed).sin()) * motion_scale;
+    let head_roll   = (-0.036 * anim_phase.sin() + 0.015 * (time_s * 1.2 + rider_seed).cos()) * motion_scale;
 
     let head_xform = Mat4::from_translation(Vec3::new(
         head_sway_x,
-        1.455 + head_bob_y,
+        (hip_y + 0.490) + head_bob_y,
         -0.015 + head_fwd_z,
     )) * Mat4::from_euler(glam::EulerRot::YXZ, head_yaw, head_pitch, head_roll);
 

@@ -1,6 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use cadence::renderer::CameraMode;
 #[cfg(not(target_arch = "wasm32"))]
+use cadence::ui::AppScreen;
+#[cfg(not(target_arch = "wasm32"))]
 use cadence::world::BiomeId;
 
 fn main() {
@@ -9,7 +11,9 @@ fn main() {
         env_logger::init();
         let args: Vec<String> = std::env::args().collect();
         let mut screenshot_path: Option<String> = None;
-        let mut biome = BiomeId::MountainClimb;
+        let mut explicit_biome: Option<BiomeId> = None;
+        let mut direct_level: Option<BiomeId> = None;
+        let mut explicit_screen: Option<AppScreen> = None;
         let mut width = 1280_u32;
         let mut height = 960_u32;
         let mut camera = CameraMode::Chase;
@@ -21,9 +25,31 @@ fn main() {
                     screenshot_path = Some(args[i + 1].clone());
                     i += 2;
                 }
+                "--level" if i + 1 < args.len() => {
+                    match BiomeId::from_str_arg(&args[i + 1]) {
+                        Some(b) => {
+                            direct_level = Some(b);
+                            explicit_biome = Some(b);
+                        }
+                        None => {
+                            eprintln!(
+                                "Unknown level '{}'. Valid levels: mountain, coastal, rural",
+                                args[i + 1]
+                            );
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 2;
+                }
                 "--biome" if i + 1 < args.len() => {
                     if let Some(b) = BiomeId::from_str_arg(&args[i + 1]) {
-                        biome = b;
+                        explicit_biome = Some(b);
+                    }
+                    i += 2;
+                }
+                "--screen" if i + 1 < args.len() => {
+                    if let Some(s) = AppScreen::from_str_arg(&args[i + 1]) {
+                        explicit_screen = Some(s);
                     }
                     i += 2;
                 }
@@ -41,6 +67,7 @@ fn main() {
                 }
                 "--camera" if i + 1 < args.len() => {
                     camera = match args[i + 1].to_ascii_lowercase().as_str() {
+                        "menu" | "main_menu" => CameraMode::MainMenu,
                         "close" => CameraMode::Close,
                         "wide" => CameraMode::Wide,
                         "side" => CameraMode::Side,
@@ -57,13 +84,21 @@ fn main() {
         }
 
         if let Some(out) = screenshot_path {
-            if let Err(err) = cadence::render_headless_screenshot(&out, biome, width, height, camera) {
+            let screen = explicit_screen.unwrap_or(if direct_level.is_some() || explicit_biome.is_some() {
+                AppScreen::InGame
+            } else {
+                AppScreen::MainMenu
+            });
+            let biome = explicit_biome.unwrap_or_else(BiomeId::random);
+            if let Err(err) =
+                cadence::render_headless_screenshot_screen(&out, biome, screen, width, height, camera)
+            {
                 eprintln!("Screenshot failed: {err}");
                 std::process::exit(1);
             }
             println!("Saved screenshot to {out}");
         } else {
-            cadence::run_windowed(biome);
+            cadence::run_windowed(direct_level);
         }
     }
 }

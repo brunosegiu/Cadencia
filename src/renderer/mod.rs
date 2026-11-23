@@ -6,14 +6,36 @@ use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
 use crate::assets::{AssetBank, MaterialRole, ModelId, SceneVertex};
-use crate::world::riders::{build_rider_draw_parts, AiRider, RiderPartDraw, RiderProfile};
+use crate::world::riders::{
+    build_rider_draw_parts, AiRider, RiderPartDraw, RiderPoseMode, RiderProfile,
+};
 use crate::world::terrain::StaticWorldGeometry;
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 
+#[derive(Debug, Clone, Copy)]
+pub struct GraphicsSettings {
+    pub outline_scale: f32,
+    pub prop_draw_distance_m: f32,
+    pub fov_offset_deg: f32,
+    pub shadows_enabled: bool,
+}
+
+impl Default for GraphicsSettings {
+    fn default() -> Self {
+        Self {
+            outline_scale: 1.0,
+            prop_draw_distance_m: 560.0,
+            fov_offset_deg: 0.0,
+            shadows_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CameraMode {
+    MainMenu,
     Chase,
     Close,
     Wide,
@@ -27,6 +49,7 @@ pub enum CameraMode {
 impl CameraMode {
     pub fn name(self) -> &'static str {
         match self {
+            CameraMode::MainMenu => "Main Menu",
             CameraMode::Chase => "Chase",
             CameraMode::Close => "Close",
             CameraMode::Wide => "Wide",
@@ -40,7 +63,7 @@ impl CameraMode {
 
     pub fn next(self) -> Self {
         match self {
-            CameraMode::Chase => CameraMode::Close,
+            CameraMode::MainMenu | CameraMode::Chase => CameraMode::Close,
             CameraMode::Close => CameraMode::Wide,
             CameraMode::Wide => CameraMode::Side,
             CameraMode::Side => CameraMode::TurnaroundBack34,
@@ -872,18 +895,35 @@ impl LigneClaireRenderer {
         player_profile: &RiderProfile,
         ai_riders: &[AiRider],
         camera_mode: CameraMode,
+        graphics: &GraphicsSettings,
         time_s: f32,
         egui_jobs: Option<(&[egui::epaint::ClippedPrimitive], &egui_wgpu::ScreenDescriptor)>,
     ) {
         self.resize(device, target_width, target_height);
 
+        let is_menu = camera_mode == CameraMode::MainMenu;
+        let eff_player_lat_m = if is_menu {
+            match biome {
+                BiomeId::CoastalPromenade => 2.15,
+                BiomeId::MountainClimb => 0.72,
+                BiomeId::RollingRuralGravel => 0.78,
+            }
+        } else {
+            player_lat_m
+        };
+
         let player_sample = spline.sample(player_dist_m);
-        let player_pos = player_sample.pos + player_sample.right * player_lat_m;
+        let player_pos = player_sample.pos + player_sample.right * eff_player_lat_m;
         let forward = player_sample.tangent;
         let right = player_sample.right;
         let up = player_sample.up;
 
-        let (cam_pos, cam_target, fov_deg) = match camera_mode {
+        let (cam_pos, cam_target, base_fov_deg) = match camera_mode {
+            CameraMode::MainMenu => (
+                player_pos - forward * 4.55 - right * 0.42 + up * 1.62,
+                player_pos + forward * 19.5 - right * 0.48 + up * 1.46,
+                47.0_f32,
+            ),
             CameraMode::Chase => (
                 player_pos - forward * 4.45 + up * 1.94 + right * 0.02,
                 player_pos + forward * 15.5 + up * 0.85,
@@ -925,6 +965,7 @@ impl LigneClaireRenderer {
                 64.0,
             ),
         };
+        let fov_deg = (base_fov_deg + graphics.fov_offset_deg).clamp(32.0, 80.0);
 
         let aspect = target_width.max(1) as f32 / target_height.max(1) as f32;
         let near = 0.25_f32;
@@ -936,7 +977,11 @@ impl LigneClaireRenderer {
 
         // Tight directional shadow frustum around player (casts crisp spoked wheel shadows!)
         let sun_dir = geo.hero_sun_dir;
-        let shadow_center = player_pos + forward * 4.0;
+        let shadow_center = if is_menu {
+            player_pos
+        } else {
+            player_pos + forward * 4.0
+        };
         let light_pos = shadow_center + sun_dir * 45.0;
         let light_view = Mat4::look_at_rh(light_pos, shadow_center, Vec3::Y);
         let r_ortho = 24.0_f32;
@@ -989,7 +1034,12 @@ impl LigneClaireRenderer {
                 1.0 / target_width.max(1) as f32,
                 1.0 / target_height.max(1) as f32,
             ],
-            outline_params: [0.036, 0.85, 0.80, 0.003],
+            outline_params: [
+                0.036,
+                0.85 * graphics.outline_scale.clamp(0.0, 2.0),
+                0.80,
+                0.003,
+            ],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame_u));
 
@@ -1023,10 +1073,11 @@ impl LigneClaireRenderer {
         };
 
         // Visible props (distance-culled)
+        let max_prop_dist = graphics.prop_draw_distance_m.clamp(150.0, 1200.0);
         for p in &geo.props {
             let pos = p.transform.w_axis.truncate();
             let dist_cam = pos.distance(cam_pos);
-            if dist_cam > 560.0 {
+            if dist_cam > max_prop_dist {
                 continue;
             }
             let num_secs = self.models.get(&p.model).map(|m| m.sections.len()).unwrap_or(0);
@@ -1049,7 +1100,7 @@ impl LigneClaireRenderer {
                 crease_s,
             );
             draw_count += 1;
-            let in_shadow = p.cast_shadow && pos.distance(shadow_center) < 34.0;
+            let in_shadow = graphics.shadows_enabled && p.cast_shadow && pos.distance(shadow_center) < 34.0;
             for si in 0..num_secs {
                 let item = DrawItem {
                     offset_bytes: off,
@@ -1064,36 +1115,45 @@ impl LigneClaireRenderer {
             }
         }
 
-        // Riders (Player + AI peloton)
+        // Riders (Player + AI peloton when in game)
         let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(96);
+        let player_pose = if is_menu {
+            RiderPoseMode::MenuStopped
+        } else {
+            RiderPoseMode::Pedaling
+        };
         build_rider_draw_parts(
             spline,
             player_dist_m,
-            player_lat_m,
+            eff_player_lat_m,
             player_wheel_rad,
             player_crank_rad,
             player_lean_rad,
             time_s,
+            player_pose,
             player_profile,
             230,
             &mut rider_parts,
         );
-        for (ai_idx, ai) in ai_riders.iter().enumerate() {
-            let s = spline.sample(ai.distance_m);
-            if s.pos.distance(cam_pos) < 180.0 {
-                let base_id = 210 - (ai_idx as u32) * 5;
-                build_rider_draw_parts(
-                    spline,
-                    ai.distance_m,
-                    ai.lateral_m,
-                    ai.wheel_angle_rad,
-                    ai.crank_angle_rad,
-                    ai.lean_angle_rad,
-                    time_s,
-                    &ai.profile,
-                    base_id,
-                    &mut rider_parts,
-                );
+        if !is_menu {
+            for (ai_idx, ai) in ai_riders.iter().enumerate() {
+                let s = spline.sample(ai.distance_m);
+                if s.pos.distance(cam_pos) < 180.0 {
+                    let base_id = 210 - (ai_idx as u32) * 5;
+                    build_rider_draw_parts(
+                        spline,
+                        ai.distance_m,
+                        ai.lateral_m,
+                        ai.wheel_angle_rad,
+                        ai.crank_angle_rad,
+                        ai.lean_angle_rad,
+                        time_s,
+                        RiderPoseMode::Pedaling,
+                        &ai.profile,
+                        base_id,
+                        &mut rider_parts,
+                    );
+                }
             }
         }
 
@@ -1104,7 +1164,7 @@ impl LigneClaireRenderer {
                 .map(|m| m.sections.iter().map(|s| s.role).collect())
                 .unwrap_or_default();
             let pos = rp.transform.w_axis.truncate();
-            let in_shadow = pos.distance(shadow_center) < 34.0;
+            let in_shadow = graphics.shadows_enabled && pos.distance(shadow_center) < 34.0;
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
                 ModelId::BikeFrame | ModelId::BikeCrank => (0.86, 0.0),
