@@ -92,7 +92,7 @@ fn vs_scene(in: VertexInput) -> SceneOut {
             let ca_ang = angles.y;
             let fo_ang = angles.z;
 
-            let w_hip_thigh = (1.0 - smoothstep(-0.095, 0.025, z_bl)) * smoothstep(0.010, 0.055, abs(x));
+            let w_hip_thigh = 1.0 - smoothstep(-0.055, 0.030, z_bl);
             let w_pelvis = 1.0 - w_hip_thigh;
             let w_knee_calf = 1.0 - smoothstep(-0.485, -0.375, z_bl);
             let w_ankle_foot = 1.0 - smoothstep(-0.865, -0.815, z_bl);
@@ -102,9 +102,9 @@ fn vs_scene(in: VertexInput) -> SceneOut {
             let wt_calf   = w_hip_thigh * w_knee_calf * (1.0 - w_ankle_foot);
             let wt_foot   = w_hip_thigh * w_knee_calf * w_ankle_foot;
 
-            let rest_hip   = vec3<f32>(side * 0.088,  0.000, 0.0);
-            let rest_knee  = vec3<f32>(side * 0.088, -0.430, 0.0);
-            let rest_ankle = vec3<f32>(side * 0.088, -0.845, 0.0);
+            let rest_hip   = vec3<f32>(side * 0.108,  0.000, 0.0);
+            let rest_knee  = vec3<f32>(side * 0.108, -0.430, 0.0);
+            let rest_ankle = vec3<f32>(side * 0.108, -0.845, 0.0);
 
             let posed_hip   = rest_hip;
             let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(th_ang), -0.430 * sin(th_ang));
