@@ -10,7 +10,9 @@ pub struct RiderProfile {
     pub w_per_kg: f32,
     pub jersey_primary: [f32; 4],
     pub jersey_secondary: [f32; 4],
+    pub jersey_accent: [f32; 4],
     pub helmet_color: [f32; 4],
+    pub helmet_accent: [f32; 4],
     pub frame_color: [f32; 4],
     pub has_backpack: bool,
     pub avatar_skin: [u8; 3],
@@ -36,7 +38,9 @@ pub struct RiderPartDraw {
     pub transform: Mat4,
     pub jersey_primary: [f32; 4],
     pub jersey_secondary: [f32; 4],
+    pub jersey_accent: [f32; 4],
     pub helmet_color: [f32; 4],
+    pub helmet_accent: [f32; 4],
     pub frame_color: [f32; 4],
     pub object_id: u32,
 }
@@ -46,14 +50,16 @@ pub fn default_player_profile() -> RiderProfile {
         name: "S. Miller",
         level: 12,
         w_per_kg: 2.8,
-        jersey_primary: [0.545, 0.416, 0.525, 1.0],
-        jersey_secondary: [0.357, 0.635, 0.608, 1.0],
-        helmet_color: [0.20, 0.22, 0.26, 1.0],
-        frame_color: [0.298, 0.459, 0.510, 1.0],
+        jersey_primary: [0.282, 0.573, 0.808, 1.0],   // cobalt sky blue (turnaround sheet)
+        jersey_secondary: [0.839, 0.306, 0.290, 1.0], // coral red panels & yoke
+        jersey_accent: [0.949, 0.800, 0.298, 1.0],    // golden yellow sleeve patches
+        helmet_color: [0.424, 0.455, 0.494, 1.0],     // matte slate grey vented shell
+        helmet_accent: [0.839, 0.322, 0.298, 1.0],    // coral-red aero ribs
+        frame_color: [0.463, 0.525, 0.588, 1.0],      // classic steel blue-grey road frame
         has_backpack: true,
-        avatar_skin: [216, 166, 138],
-        avatar_hair: [64, 52, 46],
-        avatar_shirt: [92, 162, 155],
+        avatar_skin: [226, 178, 140],
+        avatar_hair: [156, 102, 62],
+        avatar_shirt: [72, 146, 206],
         is_player: true,
     }
 }
@@ -61,9 +67,9 @@ pub fn default_player_profile() -> RiderProfile {
 pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
     let specs: &[(&str, f32, f32, f32, [f32; 4], [f32; 4], [f32; 4], [f32; 4], [u8; 3], [u8; 3], [u8; 3])] = &[
         // Left-ahead AI rider (matches O. Hansen in Reference Images: dark teal patterned kit, dark helmet)
-        ("O. Hansen", 6.8, -1.58, 2.5, [0.10, 0.22, 0.21, 1.0], [0.24, 0.58, 0.48, 1.0], [0.18, 0.20, 0.23, 1.0], [0.26, 0.32, 0.38, 1.0], [218, 174, 146], [198, 118, 72], [58, 118, 108]),
+        ("O. Hansen", 7.4, -1.55, 2.5, [0.10, 0.24, 0.22, 1.0], [0.24, 0.58, 0.48, 1.0], [0.18, 0.20, 0.23, 1.0], [0.26, 0.32, 0.38, 1.0], [218, 174, 146], [198, 118, 72], [58, 118, 108]),
         // Right-ahead AI rider (matches H. Dupont in Reference Images: seafoam turquoise jersey, crisp white helmet)
-        ("H. Dupont", 5.2, 1.48, 2.5, [0.34, 0.68, 0.65, 1.0], [0.46, 0.76, 0.72, 1.0], [0.95, 0.95, 0.93, 1.0], [0.38, 0.56, 0.62, 1.0], [224, 178, 152], [110, 74, 56], [92, 164, 155]),
+        ("H. Dupont", 5.6, 1.46, 2.5, [0.34, 0.68, 0.65, 1.0], [0.26, 0.54, 0.54, 1.0], [0.95, 0.95, 0.93, 1.0], [0.38, 0.56, 0.62, 1.0], [224, 178, 152], [110, 74, 56], [92, 164, 155]),
         ("A. Lsmith", -16.0, -0.8, 2.5, [0.68, 0.42, 0.36, 1.0], [0.82, 0.62, 0.44, 1.0], [0.22, 0.24, 0.28, 1.0], [0.45, 0.35, 0.32, 1.0], [164, 122, 98], [48, 40, 38], [175, 108, 92]),
         ("O. Hansen ", -20.0, 0.9, 2.5, [0.45, 0.52, 0.36, 1.0], [0.62, 0.68, 0.48, 1.0], [0.85, 0.83, 0.78, 1.0], [0.32, 0.40, 0.36, 1.0], [212, 168, 140], [148, 116, 84], [116, 134, 92]),
         ("M. Dupont", -24.0, -1.1, 2.5, [0.34, 0.44, 0.62, 1.0], [0.54, 0.66, 0.80, 1.0], [0.26, 0.28, 0.32, 1.0], [0.28, 0.36, 0.48, 1.0], [222, 178, 154], [78, 54, 46], [88, 112, 158]),
@@ -79,7 +85,9 @@ pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
                 w_per_kg: s.3,
                 jersey_primary: s.4,
                 jersey_secondary: s.5,
+                jersey_accent: s.5,
                 helmet_color: s.6,
+                helmet_accent: s.5,
                 frame_color: s.7,
                 has_backpack: false,
                 avatar_skin: s.8,
@@ -90,7 +98,7 @@ pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
             distance_m: (start_dist_m + s.1).rem_euclid(route_len_m),
             lateral_m: s.2,
             speed_mps: 24.5 / 3.6,
-            crank_angle_rad: (i as f32) * 1.15,
+            crank_angle_rad: -1.1 + (i as f32) * 1.45,
             wheel_angle_rad: (i as f32) * 0.7,
             lean_angle_rad: 0.0,
         })
@@ -151,7 +159,9 @@ pub fn build_rider_draw_parts(
             transform: basis * local,
             jersey_primary: profile.jersey_primary,
             jersey_secondary: profile.jersey_secondary,
+            jersey_accent: profile.jersey_accent,
             helmet_color: profile.helmet_color,
+            helmet_accent: profile.helmet_accent,
             frame_color: profile.frame_color,
             object_id: base_object_id + id_off,
         });
@@ -160,16 +170,18 @@ pub fn build_rider_draw_parts(
     // Frame & Crank share object_id base
     push(out, ModelId::BikeFrame, Mat4::IDENTITY, 0);
 
-    // Wheels share distinct id +1
+    // Wheels share distinct id +1 (Blender (0, +-0.505, 0.340) -> wgpu (0, 0.340, -+0.505))
     let wheel_rot = Mat4::from_rotation_x(-wheel_angle_rad);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.34, 0.51)) * wheel_rot, 1);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.34, -0.51)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, 0.505)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, -0.505)) * wheel_rot, 1);
 
+    // Bottom bracket: Blender (0, -0.075, 0.275) -> wgpu (0, 0.275, 0.075)
     let crank_rot = Mat4::from_rotation_x(-crank_angle_rad);
-    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.28, 0.09)) * crank_rot, 0);
+    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.075)) * crank_rot, 0);
 
-    // Rider body parts (torso, head, thighs, calves) share id +2 so hip joints stay seamless (no ring seam!)
-    let hip_center = Vec3::new(0.0, 0.99, 0.25);
+    // Rider body parts (torso, thighs, calves) share id +2 so hip & knee joints stay seamless!
+    // Backpack (+3) and Head/Helmet (+4) get crisp dedicated Ligne Claire silhouette boundaries.
+    let hip_center = Vec3::new(0.0, 0.950, 0.250);
     push(out, ModelId::RiderTorso, Mat4::from_translation(hip_center), 2);
     if profile.has_backpack {
         push(out, ModelId::RiderBackpack, Mat4::from_translation(hip_center), 3);
@@ -178,39 +190,25 @@ pub fn build_rider_draw_parts(
     push(
         out,
         ModelId::RiderHeadHelmet,
-        Mat4::from_translation(Vec3::new(0.0, 1.39, -0.15)),
-        2,
+        Mat4::from_translation(Vec3::new(0.0, 1.405, -0.095)),
+        4,
     );
 
-    // 2-Bone Analytical Leg IK in wgpu local coords (thigh points -Y from hip, calf points -Y from knee)
-    // Remember Blender crank at crank_angle_rad = 0 had right pedal at +Y = +0.172 (wgpu -Z = -0.172).
-    // Rotating around +X by -crank_angle_rad maps (0, 0, -0.172) -> (0, -0.172*sin(a), -0.172*cos(a))?
-    // Wait: in crank_rot = from_rotation_x(-theta), a vector (0, 0, -R) transforms to:
-    // y' = y*cos(-th) - z*sin(-th) = +z*(-sin(-th)) = -R * sin(th)? Let's check glam rotation_x(alpha):
-    // y' = y*cos(a) - z*sin(a), z' = y*sin(a) + z*cos(a).
-    // With a = -crank_angle_rad and (y=0, z=-R):
-    //   y' = -(-R)*sin(-theta) = -R*sin(theta) -> wait: pedal goes DOWN when theta > 0! Let's check!
-    //   If pedal rotates forward-then-down (clockwise seen from right +X): top is +Y (+Z_bl), forward is -Z (+Y_bl).
-    //   Rotating (0, 0, -R) clockwise from right (+X) is NEGATIVE angle around +X (right-hand thumb along +X curls +Y->+Z->-Y->-Z, so clockwise is -X? Wait: +X thumb points right, fingers curl +Y to +Z (back) to -Y (down) to -Z (front) -> +X rotation moves forward (-Z) UP (+Y), and -X rotation moves forward (-Z) DOWN (-Y)!).
-    //   Let's verify: with rotation_x(alpha), for (0, 0, -R):
-    //   y' = -(-R)*sin(alpha) = R*sin(alpha). If alpha = -theta (theta increasing 0..pi/2): y' = -R*sin(theta) (goes DOWN!), z' = -R*cos(theta) (stays forward-to-bottom!).
-    //   YES! Forward-then-down pedaling IS rotation_x(-theta), giving exact pedal position:
-    //   pedal_y = 0.28 - 0.172 * sin(theta_side)
-    //   pedal_z = 0.09 - 0.172 * cos(theta_side)
-    let l1 = 0.44_f32;
-    let l2 = 0.43_f32;
+    // 2-Bone Analytical Leg IK matching Blender cyclist_bike.blend (l1 = 0.425, l2 = 0.405)
+    let l1 = 0.425_f32;
+    let l2 = 0.405_f32;
     for (side, theta_off) in [(1.0_f32, 0.0_f32), (-1.0_f32, std::f32::consts::PI)].into_iter() {
         let th = crank_angle_rad + theta_off;
-        let hip = Vec3::new(side * 0.094, 0.99, 0.25);
+        let hip = Vec3::new(side * 0.088, 0.940, 0.250);
         let pedal = Vec3::new(
-            side * 0.140,
-            0.28 - 0.172 * th.sin(),
-            0.09 - 0.172 * th.cos(),
+            side * 0.118,
+            0.275 - 0.170 * th.sin(),
+            0.075 - 0.170 * th.cos(),
         );
         // Ankle sits slightly behind (+Z) and above (+Y) pedal spindle
-        let ankle = pedal + Vec3::new(0.0, 0.055, 0.03);
+        let ankle = pedal + Vec3::new(0.0, 0.052, 0.032);
         let d_vec = ankle - hip;
-        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.008);
+        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.006);
 
         // Solve in Y-Z plane (base_ang from -Y toward -Z forward)
         let base_ang = (-d_vec.z).atan2(-d_vec.y);
@@ -218,7 +216,6 @@ pub fn build_rider_draw_parts(
         let a = cos_a.acos();
         let thigh_ang = base_ang + a; // knee bends forward (-Z)
 
-        // With rotation_x(+ang), vector (0, -L, 0) goes to (0, -L*cos(ang), -L*sin(ang))
         let knee = hip + Vec3::new(0.0, -l1 * thigh_ang.cos(), -l1 * thigh_ang.sin());
         let calf_vec = ankle - knee;
         let calf_ang = (-calf_vec.z).atan2(-calf_vec.y);

@@ -60,7 +60,7 @@ impl RiderPhysicsState {
             elevation_m,
             elevation_gain_m: 88.0,
             grade_pct,
-            crank_angle_rad: 0.35,
+            crank_angle_rad: -1.35,
             wheel_angle_rad: 0.0,
             lean_angle_rad: 0.0,
             draft_factor: 0.0,

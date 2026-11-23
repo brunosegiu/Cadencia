@@ -85,7 +85,9 @@ pub enum MaterialRole {
     BikeFrame,
     JerseyPrimary,
     JerseySecondary,
+    JerseyAccent,
     Helmet,
+    HelmetAccent,
     Shorts,
     Skin,
     Foliage,
@@ -118,6 +120,12 @@ fn classify_role(id: ModelId, mat_name: &str) -> (MaterialRole, u32) {
         (MaterialRole::JerseyPrimary, 4)
     } else if n.contains("jersey_secondary") {
         (MaterialRole::JerseySecondary, 4)
+    } else if n.contains("jersey_accent") {
+        (MaterialRole::JerseyAccent, 4)
+    } else if n.contains("helmet_dark") {
+        (MaterialRole::Default, 4)
+    } else if n.contains("helmet_accent") {
+        (MaterialRole::HelmetAccent, 4)
     } else if n.contains("helmet") {
         (MaterialRole::Helmet, 4)
     } else if n.contains("shorts") {
@@ -201,7 +209,9 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
                 MaterialRole::BikeFrame
                     | MaterialRole::JerseyPrimary
                     | MaterialRole::JerseySecondary
+                    | MaterialRole::JerseyAccent
                     | MaterialRole::Helmet
+                    | MaterialRole::HelmetAccent
             );
             let vert_color = if tintable_white { [1.0, 1.0, 1.0, 1.0] } else { color };
 

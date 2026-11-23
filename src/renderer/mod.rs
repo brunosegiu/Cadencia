@@ -834,14 +834,14 @@ impl LigneClaireRenderer {
 
         let (cam_pos, cam_target, fov_deg) = match camera_mode {
             CameraMode::Chase => (
-                player_pos - forward * 3.25 + up * 1.88 + right * 0.02,
-                player_pos + forward * 16.5 + up * 1.05,
-                52.0_f32,
+                player_pos - forward * 4.45 + up * 1.94 + right * 0.02,
+                player_pos + forward * 15.5 + up * 0.85,
+                51.0_f32,
             ),
             CameraMode::Close => (
-                player_pos - forward * 2.25 + up * 1.50 + right * 0.35,
-                player_pos + forward * 10.0 + up * 1.10,
-                54.0,
+                player_pos - forward * 2.55 + up * 1.48 + right * 0.45,
+                player_pos + forward * 8.0 + up * 1.02,
+                52.0,
             ),
             CameraMode::Wide => (
                 player_pos - forward * 5.6 + up * 2.75 - right * 0.5,
@@ -849,9 +849,9 @@ impl LigneClaireRenderer {
                 56.0,
             ),
             CameraMode::Side => (
-                player_pos + right * 4.2 + up * 1.35 - forward * 0.8,
-                player_pos + up * 0.95,
-                46.0,
+                player_pos + right * 2.55 + up * 1.12 - forward * 0.35,
+                player_pos + up * 0.88,
+                44.0,
             ),
             CameraMode::FirstPerson => (
                 player_pos + up * 1.58 + forward * 0.25,
@@ -1005,7 +1005,7 @@ impl LigneClaireRenderer {
         for (ai_idx, ai) in ai_riders.iter().enumerate() {
             let s = spline.sample(ai.distance_m);
             if s.pos.distance(cam_pos) < 180.0 {
-                let base_id = 210 - (ai_idx as u32) * 4;
+                let base_id = 210 - (ai_idx as u32) * 5;
                 build_rider_draw_parts(
                     spline,
                     ai.distance_m,
@@ -1028,15 +1028,22 @@ impl LigneClaireRenderer {
                 .unwrap_or_default();
             let pos = rp.transform.w_axis.truncate();
             let in_shadow = pos.distance(shadow_center) < 34.0;
+            let (outline_w, crease_s) = match rp.model {
+                ModelId::RiderTorso | ModelId::RiderThigh | ModelId::RiderCalfShoe => (0.95, 0.20),
+                ModelId::RiderHeadHelmet | ModelId::RiderBackpack => (0.95, 0.36),
+                _ => (0.92, 0.58),
+            };
             for (si, role) in sec_roles.into_iter().enumerate() {
                 let tint = match role {
                     MaterialRole::BikeFrame => rp.frame_color,
                     MaterialRole::JerseyPrimary => rp.jersey_primary,
                     MaterialRole::JerseySecondary => rp.jersey_secondary,
+                    MaterialRole::JerseyAccent => rp.jersey_accent,
                     MaterialRole::Helmet => rp.helmet_color,
+                    MaterialRole::HelmetAccent => rp.helmet_accent,
                     _ => [1.0, 1.0, 1.0, 1.0],
                 };
-                let off = self.push_obj_uniform(device, draw_count, rp.transform, tint, rp.object_id, 1.0, 0.72);
+                let off = self.push_obj_uniform(device, draw_count, rp.transform, tint, rp.object_id, outline_w, crease_s);
                 draw_count += 1;
                 let item = DrawItem {
                     offset_bytes: off,
