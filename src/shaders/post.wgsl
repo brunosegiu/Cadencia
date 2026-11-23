@@ -10,7 +10,7 @@ struct FrameUniforms {
     sky_horizon: vec4<f32>,
     fog_color: vec4<f32>,
     screen_params: vec4<f32>,
-    outline_params: vec4<f32>, // x: depth_thresh, y: normal_thresh, z: strength, w: grain
+    outline_params: vec4<f32>, // x: rel_depth_thresh, y: normal_thresh, z: strength, w: grain
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -18,6 +18,7 @@ struct FrameUniforms {
 @group(0) @binding(2) var normal_tex: texture_2d<f32>;
 @group(0) @binding(3) var depth_tex: texture_2d<f32>;
 @group(0) @binding(4) var gbuf_sampler: sampler;
+@group(0) @binding(5) var hw_depth_tex: texture_depth_2d;
 
 struct PostOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -38,8 +39,12 @@ fn vs_post(@builtin(vertex_index) idx: u32) -> PostOut {
     return out;
 }
 
-fn decode_depth(c: vec4<f32>) -> f32 {
-    return (c.r * 255.0 + c.g) / 255.0 * frame.sky_zenith.w;
+fn load_linear_depth(coord: vec2<i32>, max_c: vec2<i32>) -> f32 {
+    let c = clamp(coord, vec2<i32>(0, 0), max_c);
+    let d_ndc = textureLoad(hw_depth_tex, c, 0);
+    let near = frame.sun_color.w;
+    let far = frame.sky_zenith.w;
+    return (near * far) / max(far - d_ndc * (far - near), 0.0001);
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -53,87 +58,74 @@ fn hash_grain(p: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_post(in: PostOut) -> @location(0) vec4<f32> {
-    let px = frame.screen_params.zw;
+    let max_c = vec2<i32>(frame.screen_params.xy) - vec2<i32>(1, 1);
+    let p = clamp(vec2<i32>(in.clip_pos.xy), vec2<i32>(0, 0), max_c);
+    let p_r = min(p + vec2<i32>(1, 0), max_c);
+    let p_b = min(p + vec2<i32>(0, 1), max_c);
+
+    // Keep sampler referenced while reading exact 1:1 texels for razor-thin 1px contours
     let center_col = textureSampleLevel(lit_tex, gbuf_sampler, in.uv, 0.0).rgb;
-    let center_nid = textureSampleLevel(normal_tex, gbuf_sampler, in.uv, 0.0);
-    let center_dm = textureSampleLevel(depth_tex, gbuf_sampler, in.uv, 0.0);
 
-    let c_norm = center_nid.xyz * 2.0 - 1.0;
-    let c_id = center_nid.a;
-    let c_depth = decode_depth(center_dm);
-    let outline_w = center_dm.b;
-    let crease_s = center_dm.a;
+    let nid_c = textureLoad(normal_tex, p, 0);
+    let nid_r = textureLoad(normal_tex, p_r, 0);
+    let nid_b = textureLoad(normal_tex, p_b, 0);
 
-    // 3x3 Sobel edge detection across Depth, View-Normal, and Object-ID
-    let o_tl = vec2<f32>(-px.x, -px.y);
-    let o_tc = vec2<f32>( 0.0,  -px.y);
-    let o_tr = vec2<f32>( px.x, -px.y);
-    let o_ml = vec2<f32>(-px.x,  0.0);
-    let o_mr = vec2<f32>( px.x,  0.0);
-    let o_bl = vec2<f32>(-px.x,  px.y);
-    let o_bc = vec2<f32>( 0.0,   px.y);
-    let o_br = vec2<f32>( px.x,  px.y);
+    let dm_c = textureLoad(depth_tex, p, 0);
+    let dm_r = textureLoad(depth_tex, p_r, 0);
+    let dm_b = textureLoad(depth_tex, p_b, 0);
 
-    let dm_tl = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_tl, 0.0);
-    let dm_tc = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_tc, 0.0);
-    let dm_tr = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_tr, 0.0);
-    let dm_ml = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_ml, 0.0);
-    let dm_mr = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_mr, 0.0);
-    let dm_bl = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_bl, 0.0);
-    let dm_bc = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_bc, 0.0);
-    let dm_br = textureSampleLevel(depth_tex, gbuf_sampler, in.uv + o_br, 0.0);
+    let n_c = nid_c.xyz * 2.0 - 1.0;
+    let n_r = nid_r.xyz * 2.0 - 1.0;
+    let n_b = nid_b.xyz * 2.0 - 1.0;
 
-    let d_tl = decode_depth(dm_tl);
-    let d_tc = decode_depth(dm_tc);
-    let d_tr = decode_depth(dm_tr);
-    let d_ml = decode_depth(dm_ml);
-    let d_mr = decode_depth(dm_mr);
-    let d_bl = decode_depth(dm_bl);
-    let d_bc = decode_depth(dm_bc);
-    let d_br = decode_depth(dm_br);
+    // Exact 32-bit hardware float depth (eliminates all 8-bit contour rings on close curved limbs!)
+    let d_c = load_linear_depth(p, max_c);
+    let d_r = load_linear_depth(p_r, max_c);
+    let d_b = load_linear_depth(p_b, max_c);
 
-    let gx_d = (d_tr + 2.0 * d_mr + d_br) - (d_tl + 2.0 * d_ml + d_bl);
-    let gy_d = (d_bl + 2.0 * d_bc + d_br) - (d_tl + 2.0 * d_tc + d_tr);
-    let edge_d_raw = sqrt(gx_d * gx_d + gy_d * gy_d);
+    // 1-pixel forward-difference depth silhouettes (right & down only -> always crisp 1px thin!)
+    let min_d_r = min(d_c, d_r);
+    let n_close_r = select(n_r, n_c, d_c < d_r);
+    let graz_r = 1.0 / max(abs(n_close_r.z), 0.40);
+    let thresh_r = max(min_d_r * frame.outline_params.x, 0.065) * graz_r;
+    let ed_r = smoothstep(thresh_r * 0.80, thresh_r * 1.45, abs(d_r - d_c));
 
-    // Grazing angle protection so road & hillsides never get false depth bands
-    let grazing_scale = 1.0 / max(abs(c_norm.z), 0.16);
-    let depth_thresh = frame.outline_params.x * max(c_depth * 0.14, 0.6) * grazing_scale;
-    let edge_d = smoothstep(depth_thresh * 0.55, depth_thresh * 1.4, edge_d_raw);
+    let min_d_b = min(d_c, d_b);
+    let n_close_b = select(n_b, n_c, d_c < d_b);
+    let graz_b = 1.0 / max(abs(n_close_b.z), 0.40);
+    let thresh_b = max(min_d_b * frame.outline_params.x, 0.065) * graz_b;
+    let ed_b = smoothstep(thresh_b * 0.80, thresh_b * 1.45, abs(d_b - d_c));
 
-    let n_tl = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_tl, 0.0);
-    let n_tc = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_tc, 0.0);
-    let n_tr = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_tr, 0.0);
-    let n_ml = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_ml, 0.0);
-    let n_mr = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_mr, 0.0);
-    let n_bl = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_bl, 0.0);
-    let n_bc = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_bc, 0.0);
-    let n_br = textureSampleLevel(normal_tex, gbuf_sampler, in.uv + o_br, 0.0);
+    let edge_d = max(ed_r, ed_b);
 
-    let gx_n = (n_tr.xyz + 2.0 * n_mr.xyz + n_br.xyz) - (n_tl.xyz + 2.0 * n_ml.xyz + n_bl.xyz);
-    let gy_n = (n_bl.xyz + 2.0 * n_bc.xyz + n_br.xyz) - (n_tl.xyz + 2.0 * n_tc.xyz + n_tr.xyz);
-    let edge_n_raw = length(gx_n) + length(gy_n);
-    let edge_n = smoothstep(frame.outline_params.y * 0.65, frame.outline_params.y * 1.35, edge_n_raw) * crease_s;
+    // 1-pixel forward-difference Object-ID boundary (separates bike, limbs, helmet, pack, posts, rocks cleanly)
+    let id_r = step(0.002, abs(nid_r.a - nid_c.a));
+    let id_b = step(0.002, abs(nid_b.a - nid_c.a));
+    let edge_id = max(id_r, id_b);
 
-    // Object-ID discontinuity separates bike frame, limbs, fence posts, rocks, buildings cleanly
-    let id_diff = max(
-        max(abs(n_tc.a - c_id), abs(n_bc.a - c_id)),
-        max(abs(n_ml.a - c_id), abs(n_mr.a - c_id))
-    );
-    let edge_id = step(0.002, id_diff);
+    // Strict architectural-only corner crease (crease_s is 0.0 on riders, rocks, terrain, foliage!)
+    let crease_r = min(dm_c.a, dm_r.a);
+    let crease_b = min(dm_c.a, dm_b.a);
+    let en_r = smoothstep(frame.outline_params.y * 0.85, frame.outline_params.y * 1.25, length(n_r - n_c)) * crease_r;
+    let en_b = smoothstep(frame.outline_params.y * 0.85, frame.outline_params.y * 1.25, length(n_b - n_c)) * crease_b;
+    let edge_n = max(en_r, en_b);
 
-    // Also inherit max neighbor outline_weight on silhouettes against sky
-    let max_w = max(outline_w, max(max(dm_tc.b, dm_bc.b), max(dm_ml.b, dm_mr.b)));
-    let ink_mask = clamp(max(edge_d, max(edge_n * 0.85, edge_id * 0.88)) * max_w * frame.outline_params.z, 0.0, 1.0);
+    // Pick outline weight from the foreground/edge-bearing pixel so silhouettes against sky stay crisp & even
+    let w_r = select(dm_r.b, dm_c.b, d_c < d_r);
+    let w_b = select(dm_b.b, dm_c.b, d_c < d_b);
+    let edge_w = max(dm_c.b, max(w_r * max(ed_r, id_r), w_b * max(ed_b, id_b)));
 
-    // Distance-faded Ligne Claire charcoal-sepia ink -> soft misty slate on far hills
-    let near_ink = vec3<f32>(0.11, 0.10, 0.09);
-    let far_ink = mix(frame.fog_color.rgb * 0.58, vec3<f32>(0.32, 0.38, 0.42), 0.5);
-    let ink_col = mix(near_ink, far_ink, smoothstep(45.0, 260.0, c_depth));
+    let ink_mask = clamp(max(edge_d, max(edge_id * 0.90, edge_n * 0.70)) * edge_w * frame.outline_params.z, 0.0, 1.0);
+
+    // Use nearest participating pixel depth for smooth aerial-perspective ink fading
+    let edge_depth = min(d_c, min(d_r, d_b));
+    let near_ink = vec3<f32>(0.13, 0.14, 0.16);
+    let far_ink = mix(frame.fog_color.rgb * 0.65, vec3<f32>(0.36, 0.42, 0.46), 0.45);
+    let ink_col = mix(near_ink, far_ink, smoothstep(55.0, 280.0, edge_depth));
 
     var final_col = mix(center_col, ink_col, ink_mask);
 
-    // Ultra-subtle warm paper grain
+    // Whisper-light paper texture
     let grain = (hash_grain(in.uv * frame.screen_params.xy) - 0.5) * frame.outline_params.w;
     final_col = clamp(final_col + vec3<f32>(grain), vec3<f32>(0.0), vec3<f32>(1.0));
 

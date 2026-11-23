@@ -198,36 +198,23 @@ fn fs_scene(in: SceneOut) -> GBufferOut {
         albedo *= 0.90 + 0.18 * n_leaf;
     }
 
-    // Stepped 3-band Ligne Claire toon lighting
+    // Clean crisp 2-tone stylized cel lighting (bright warm sunlit plane + airy cool slate shadow)
     let shadow_vis = sample_shadow_pcf(in.shadow_pos, max(ndotl, 0.0));
     let diffuse_raw = ndotl * 0.5 + 0.5;
-    // Two soft-stepped cel thresholds
-    let band_mid = smoothstep(0.42, 0.50, diffuse_raw);
-    let band_hi = smoothstep(0.72, 0.82, diffuse_raw);
-    let lit_level = mix(0.28, mix(0.68, 1.0, band_hi), band_mid);
+    // Crisp cel terminator with subtle soft anti-aliased transition
+    let cel_lit = smoothstep(0.45, 0.52, diffuse_raw);
+    let cel_hi = smoothstep(0.76, 0.86, diffuse_raw);
+    let effective_sun = cel_lit * mix(0.18, 1.0, shadow_vis);
 
-    // Combine cel band with crisp projected shadow map
-    let effective_sun = lit_level * mix(0.32, 1.0, shadow_vis);
+    let shadow_tint = albedo * vec3<f32>(0.64, 0.67, 0.76);
+    let lit_base = albedo * mix(vec3<f32>(0.99, 0.97, 0.95), frame.sun_color.rgb * 1.06, 0.28 + 0.16 * cel_hi);
 
-    let shadow_tint = albedo * vec3<f32>(0.57, 0.55, 0.65);
-    let mid_tint = albedo * vec3<f32>(0.97, 0.94, 0.91);
-    let hi_tint = albedo * mix(vec3<f32>(1.0), frame.sun_color.rgb, 0.46) * 1.09;
+    var lit_col = mix(shadow_tint, lit_base, smoothstep(0.28, 0.68, effective_sun));
 
-    var lit_col = mix(shadow_tint, mid_tint, smoothstep(0.25, 0.65, effective_sun));
-    lit_col = mix(lit_col, hi_tint, smoothstep(0.65, 1.0, effective_sun));
-
-    // Gentle golden-hour rim light on silhouettes (especially riders, trees, boulders)
-    let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.2);
-    let rim = fresnel * max(ndotl * 0.5 + 0.5, 0.25) * shadow_vis;
-    lit_col += frame.sun_color.rgb * rim * 0.16;
-
-    // Subtle hand-drawn cross-hatch accent inside deep shadows on rocks/buildings
-    if (mat_type == 0u || mat_type == 5u) {
-        let in_shadow = 1.0 - smoothstep(0.26, 0.45, effective_sun);
-        let hatch = sin((in.world_pos.x + in.world_pos.y * 1.5 + in.world_pos.z) * 14.0);
-        let hatch_line = smoothstep(0.84, 0.96, hatch) * in_shadow * smoothstep(55.0, 12.0, in.view_depth);
-        lit_col *= 1.0 - hatch_line * 0.14;
-    }
+    // Subtle clean sunlit rim accent on silhouettes
+    let fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.6);
+    let rim = fresnel * max(ndotl * 0.5 + 0.5, 0.20) * shadow_vis;
+    lit_col += frame.sun_color.rgb * rim * 0.09;
 
     // Aerial perspective atmospheric fog
     let fog_dist = max(in.view_depth - 35.0, 0.0);

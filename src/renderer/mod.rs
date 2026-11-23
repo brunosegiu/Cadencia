@@ -348,6 +348,16 @@ impl LigneClaireRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -728,6 +738,10 @@ impl LigneClaireRenderer {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(gbuf_sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&scene_depth_view),
+                },
             ],
         });
 
@@ -849,9 +863,9 @@ impl LigneClaireRenderer {
                 56.0,
             ),
             CameraMode::Side => (
-                player_pos + right * 2.55 + up * 1.12 - forward * 0.35,
-                player_pos + up * 0.88,
-                44.0,
+                player_pos + right * 2.75 + up * 1.16 - forward * 0.30,
+                player_pos + up * 1.00,
+                48.0,
             ),
             CameraMode::FirstPerson => (
                 player_pos + up * 1.58 + forward * 0.25,
@@ -923,7 +937,7 @@ impl LigneClaireRenderer {
                 1.0 / target_width.max(1) as f32,
                 1.0 / target_height.max(1) as f32,
             ],
-            outline_params: [0.22, 0.44, 0.96, 0.016],
+            outline_params: [0.036, 0.85, 0.80, 0.003],
         };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame_u));
 
@@ -939,12 +953,12 @@ impl LigneClaireRenderer {
             scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 1 });
         }
         if self.world_bufs.terrain.is_some() {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.72, 0.75);
+            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0);
             draw_count += 1;
             scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 2 });
         }
         if self.world_bufs.wire.is_some() {
-            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.65, 0.0);
+            let off = self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0);
             draw_count += 1;
             scene_draws.push(DrawItem { offset_bytes: off, model_id: None, section_idx: 0, world_kind: 3 });
         }
@@ -964,6 +978,15 @@ impl LigneClaireRenderer {
                 continue;
             }
             let num_secs = self.models.get(&p.model).map(|m| m.sections.len()).unwrap_or(0);
+            // Keep internal crease lines strictly off organic/rock/foliage geometry (silhouette-only!)
+            // and allow subtle architectural corner creases only on crisp man-made structures.
+            let crease_s = match p.model {
+                ModelId::ColonialTownhouse
+                | ModelId::CoastalBuildingTall
+                | ModelId::CoastalBuildingMid
+                | ModelId::RanchHouse => 0.45,
+                _ => 0.0,
+            };
             let off = self.push_obj_uniform(
                 device,
                 draw_count,
@@ -971,7 +994,7 @@ impl LigneClaireRenderer {
                 p.tint,
                 p.object_id,
                 p.outline_weight,
-                p.crease_sensitivity,
+                crease_s,
             );
             draw_count += 1;
             let in_shadow = p.cast_shadow && pos.distance(shadow_center) < 34.0;
@@ -1029,9 +1052,9 @@ impl LigneClaireRenderer {
             let pos = rp.transform.w_axis.truncate();
             let in_shadow = pos.distance(shadow_center) < 34.0;
             let (outline_w, crease_s) = match rp.model {
-                ModelId::RiderTorso | ModelId::RiderThigh | ModelId::RiderCalfShoe => (0.95, 0.20),
-                ModelId::RiderHeadHelmet | ModelId::RiderBackpack => (0.95, 0.36),
-                _ => (0.92, 0.58),
+                ModelId::BikeWheel => (0.72, 0.0),
+                ModelId::BikeFrame | ModelId::BikeCrank => (0.86, 0.0),
+                _ => (0.92, 0.0),
             };
             for (si, role) in sec_roles.into_iter().enumerate() {
                 let tint = match role {
