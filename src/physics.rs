@@ -52,26 +52,26 @@ pub struct PhysicsForces {
 }
 
 impl RiderPhysicsState {
-    /// Initializes rider state matching the reference HUD screenshot (4.2 km, 88 m gain, 14:32, 24.5 km/h).
+    /// Initializes rider state starting at 0:00:00 when entering a map.
     pub fn new_hero_default(start_distance_m: f32, elevation_m: f32, grade_pct: f32) -> Self {
         Self {
             distance_m: start_distance_m,
-            display_distance_m: 4200.0,
+            display_distance_m: 0.0,
             speed_mps: 24.5 / 3.6,
             elevation_m,
-            elevation_gain_m: 88.0,
+            elevation_gain_m: 0.0,
             grade_pct,
             crank_angle_rad: -1.35,
             wheel_angle_rad: 0.0,
             lean_angle_rad: 0.0,
             animated_cadence_rpm: 90.0,
             draft_factor: 0.0,
-            avg_power_w: 92.0,
-            elapsed_s: 14.0 * 60.0 + 32.0,
-            drops_points: 252_870,
+            avg_power_w: 185.0,
+            elapsed_s: 0.0,
+            drops_points: 0,
             last_forces: PhysicsForces::default(),
-            power_samples_sum: 92.0 * 872.0,
-            power_samples_count: 872,
+            power_samples_sum: 0.0,
+            power_samples_count: 0,
             drops_accum: 0.0,
         }
     }

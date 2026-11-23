@@ -168,6 +168,7 @@ fn grade_to_color(grade_pct: f32) -> Color32 {
     }
 }
 
+#[allow(dead_code)]
 fn draw_ink_button(
     ui: &mut Ui,
     center: Pos2,
@@ -287,13 +288,13 @@ pub fn draw_hud(
     let slate_border = Color32::from_rgba_unmultiplied(192, 214, 224, 165);
     let brown_bg = Color32::from_rgba_unmultiplied(56, 42, 32, 218);
 
-    // 1. TOP-LEFT POWER & BIOMETRICS CARD + EFFORT LEAF DIAL
+    // 1. TOP-LEFT POWER & BIOMETRICS CARD (no leaf dial, no heart rate, no gear footer)
     egui::Area::new(egui::Id::unique("hud_top_left"))
         .fade_in(false)
         .fixed_pos(Pos2::new(16.0, 14.0))
         .interactable(false)
         .show(ctx, |ui| {
-            let card_rect = Rect::from_min_size(Pos2::new(16.0, 14.0), Vec2::new(178.0, 146.0));
+            let card_rect = Rect::from_min_size(Pos2::new(16.0, 14.0), Vec2::new(178.0, 122.0));
             let p = ui.painter();
             p.rect(
                 card_rect,
@@ -319,7 +320,7 @@ pub fn draw_hud(
                 Stroke::NONE,
             ));
 
-            // 185 W
+            // Wattage readout
             let watts = telemetry.power_w.round() as i32;
             p.text(
                 Pos2::new(card_rect.min.x + 95.0, card_rect.min.y + 27.0),
@@ -353,16 +354,14 @@ pub fn draw_hud(
                 p.rect_filled(r, CornerRadius::same(2), c);
             }
 
-            // 2x2 grid metrics
+            // Metrics: W/KG, AVG, RPM (heart rate removed)
             let wkg = telemetry.power_w / sim.rider_weight_kg.max(35.0);
             let avg_w = physics.avg_power_w.round() as i32;
             let cad = telemetry.cadence_rpm.round() as i32;
-            let hr = telemetry.heart_rate_bpm.round() as i32;
             let cells = [
                 (0, 0, format!("{wkg:.1}"), "W/KG"),
                 (1, 0, format!("{avg_w}"), "AVG"),
                 (0, 1, format!("{cad}"), "RPM"),
-                (1, 1, format!("{hr}"), "BPM"),
             ];
             for (cx_i, cy_i, val, lbl) in cells {
                 let bx = card_rect.min.x + 18.0 + cx_i as f32 * 82.0;
@@ -390,21 +389,11 @@ pub fn draw_hud(
                             Stroke::NONE,
                         ));
                     }
-                    (0, 1) => {
+                    _ => {
                         // Crank & pedal icon
                         p.circle(ic, 5.2, Color32::TRANSPARENT, Stroke::new(1.5, w_col));
                         p.line_segment([ic, ic + Vec2::new(5.5, -3.5)], Stroke::new(1.8, w_col));
                         p.circle_filled(ic, 2.0, w_col);
-                    }
-                    _ => {
-                        // Heart icon
-                        p.circle_filled(ic + Vec2::new(-2.8, -1.5), 3.0, w_col);
-                        p.circle_filled(ic + Vec2::new(2.8, -1.5), 3.0, w_col);
-                        p.add(Shape::convex_polygon(
-                            vec![ic + Vec2::new(-5.4, -0.5), ic + Vec2::new(5.4, -0.5), ic + Vec2::new(0.0, 5.8)],
-                            w_col,
-                            Stroke::NONE,
-                        ));
                     }
                 };
                 p.text(
@@ -422,79 +411,6 @@ pub fn draw_hud(
                     Color32::from_rgb(196, 206, 214),
                 );
             }
-
-            // Footer: GEAR 4 + vector up arrow (no tofu box!)
-            p.text(
-                Pos2::new(card_rect.center().x - 6.0, card_rect.max.y - 11.0),
-                Align2::CENTER_CENTER,
-                format!("GEAR {}", sim.gear),
-                FontId::new(11.0, FontFamily::Proportional),
-                Color32::from_rgb(228, 234, 238),
-            );
-            let ax = card_rect.center().x + 22.0;
-            let ay = card_rect.max.y - 11.0;
-            p.line_segment([Pos2::new(ax, ay + 4.0), Pos2::new(ax, ay - 4.0)], Stroke::new(1.4, Color32::from_rgb(228, 234, 238)));
-            p.line(vec![Pos2::new(ax - 3.0, ay - 1.0), Pos2::new(ax, ay - 4.5), Pos2::new(ax + 3.0, ay - 1.0)], Stroke::new(1.4, Color32::from_rgb(228, 234, 238)));
-
-            // Circular Power-Up / Effort Leaf Dial next to top-left card
-            let dial_c = Pos2::new(card_rect.max.x + 48.0, card_rect.min.y + 62.0);
-            let outer_r = 38.0_f32;
-            let inner_r = 25.5_f32;
-            p.circle(dial_c, outer_r + 2.0, Color32::from_rgba_unmultiplied(245, 240, 228, 220), Stroke::new(1.5, Color32::from_rgba_unmultiplied(120, 115, 105, 160)));
-            let ring_cols = [
-                Color32::from_rgb(220, 96, 98),
-                Color32::from_rgb(138, 190, 94),
-                Color32::from_rgb(232, 198, 86),
-                Color32::from_rgb(106, 178, 206),
-                Color32::from_rgb(192, 134, 176),
-                Color32::from_rgb(226, 150, 92),
-            ];
-            for (si, &rc) in ring_cols.iter().enumerate() {
-                let a0 = (si as f32 / 6.0) * std::f32::consts::TAU - 0.5;
-                let a1 = ((si + 1) as f32 / 6.0) * std::f32::consts::TAU - 0.5;
-                let steps = 8;
-                let mut pts_o = Vec::with_capacity(steps + 1);
-                let mut pts_i = Vec::with_capacity(steps + 1);
-                for k in 0..=steps {
-                    let a = a0 + (a1 - a0) * (k as f32 / steps as f32);
-                    pts_o.push(dial_c + Vec2::new(a.cos(), a.sin()) * outer_r);
-                    pts_i.push(dial_c + Vec2::new(a.cos(), a.sin()) * inner_r);
-                }
-                let mut mesh = Mesh::default();
-                for k in 0..steps {
-                    let base = mesh.vertices.len() as u32;
-                    for pt in [pts_o[k], pts_o[k + 1], pts_i[k + 1], pts_i[k]] {
-                        mesh.vertices.push(Vertex { pos: pt, uv: Pos2::ZERO, color: rc });
-                    }
-                    mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-                }
-                p.add(Shape::mesh(mesh));
-            }
-            // Inner dark green circle + leaf icon
-            p.circle(dial_c, inner_r, Color32::from_rgb(48, 84, 52), Stroke::new(2.0, Color32::WHITE));
-            p.add(Shape::convex_polygon(
-                vec![
-                    dial_c + Vec2::new(0.0, -14.0),
-                    dial_c + Vec2::new(10.0, -3.0),
-                    dial_c + Vec2::new(8.0, 9.0),
-                    dial_c + Vec2::new(0.0, 14.0),
-                    dial_c + Vec2::new(-8.0, 9.0),
-                    dial_c + Vec2::new(-10.0, -3.0),
-                ],
-                Color32::from_rgb(108, 174, 86),
-                Stroke::new(1.3, Color32::from_rgb(38, 66, 36)),
-            ));
-            p.line_segment([dial_c + Vec2::new(0.0, -11.0), dial_c + Vec2::new(0.0, 13.0)], Stroke::new(1.5, Color32::from_rgb(220, 238, 198)));
-            // Orange pointer arrow on left
-            p.add(Shape::convex_polygon(
-                vec![
-                    dial_c + Vec2::new(-outer_r - 9.0, -3.0),
-                    dial_c + Vec2::new(-outer_r - 1.0, 0.0),
-                    dial_c + Vec2::new(-outer_r - 9.0, 3.0),
-                ],
-                Color32::from_rgb(224, 108, 72),
-                Stroke::NONE,
-            ));
         });
 
     // 2. TOP-CENTER TELEMETRY & ELEVATION PROFILE CARD
@@ -559,38 +475,9 @@ pub fn draw_hud(
                 Color32::from_rgb(218, 96, 62),
             );
 
-            // Badge 25 left & Drops 252,870 right
-            p.rect_filled(
-                Rect::from_min_size(Pos2::new(rect.min.x + 12.0, rect.min.y + 44.0), Vec2::new(42.0, 15.0)),
-                CornerRadius::same(7),
-                Color32::from_rgb(38, 44, 49),
-            );
-            p.text(
-                Pos2::new(rect.min.x + 33.0, rect.min.y + 51.5),
-                Align2::CENTER_CENTER,
-                "25",
-                FontId::new(10.5, FontFamily::Proportional),
-                Color32::WHITE,
-            );
-            let drops_str = format!(
-                "{},{}",
-                physics.drops_points / 1000,
-                format!("{:03}", physics.drops_points % 1000)
-            );
-            let drops_rect = Rect::from_min_size(Pos2::new(rect.max.x - 86.0, rect.min.y + 44.0), Vec2::new(74.0, 16.0));
-            p.rect_filled(drops_rect, CornerRadius::same(8), Color32::from_rgb(38, 126, 174));
-            p.text(
-                drops_rect.center() + Vec2::new(-4.0, 0.0),
-                Align2::CENTER_CENTER,
-                drops_str,
-                FontId::new(10.5, FontFamily::Proportional),
-                Color32::WHITE,
-            );
-            p.circle_filled(Pos2::new(drops_rect.max.x - 9.0, drops_rect.center().y), 3.0, Color32::from_rgb(168, 224, 248));
-
             // Gradient-colored Elevation Area Graph (windowed so rider sits ~70% across with uphill ahead)
             let graph_rect = Rect::from_min_max(
-                Pos2::new(rect.min.x + 10.0, rect.min.y + 62.0),
+                Pos2::new(rect.min.x + 10.0, rect.min.y + 52.0),
                 Pos2::new(rect.max.x - 10.0, rect.max.y - 8.0),
             );
             let prof = &spline.elevation_profile;
@@ -654,14 +541,13 @@ pub fn draw_hud(
             }
         });
 
-    // 3. TOP-RIGHT MINIMAP + 5 CIRCULAR INKED PARCHMENT BUTTONS
+    // 3. TOP-RIGHT MINIMAP (top circular icons removed)
     egui::Area::new(egui::Id::unique("hud_top_right"))
         .fade_in(false)
-        .fixed_pos(Pos2::new(w - 392.0, 12.0))
+        .fixed_pos(Pos2::new(w - 284.0, 14.0))
+        .interactable(false)
         .show(ctx, |ui| {
-            // Allocate explicit area so interactive circular buttons receive clicks
-            let _ = ui.allocate_rect(Rect::from_min_size(Pos2::new(w - 392.0, 12.0), Vec2::new(382.0, 196.0)), Sense::hover());
-            let map_rect = Rect::from_min_size(Pos2::new(w - 360.0, 68.0), Vec2::new(268.0, 114.0));
+            let map_rect = Rect::from_min_size(Pos2::new(w - 284.0, 14.0), Vec2::new(268.0, 114.0));
             let p = ui.painter();
             let land_col = Color32::from_rgb(142, 166, 98);
             let sea_col = Color32::from_rgb(64, 146, 198);
@@ -736,20 +622,6 @@ pub fn draw_hud(
                 FontId::new(11.5, FontFamily::Proportional),
                 Color32::WHITE,
             );
-
-            // 4 circular inked parchment buttons (no on-the-fly biome switching!)
-            if draw_ink_button(ui, Pos2::new(w - 170.0, 38.0), 21.0, 0, "Toggle Help & Shortcuts (M)") {
-                hud_state.menu_open = !hud_state.menu_open;
-            }
-            if draw_ink_button(ui, Pos2::new(w - 116.0, 38.0), 21.0, 1, "Hardware Simulator & BLE Menu") {
-                hud_state.menu_open = !hud_state.menu_open;
-            }
-            if draw_ink_button(ui, Pos2::new(w - 38.0, 38.0), 24.0, 2, "Cycle Camera Angle (C)") {
-                actions.cycle_camera = Some(camera_mode.next());
-            }
-            if draw_ink_button(ui, Pos2::new(w - 38.0, 102.0), 24.0, 4, "Settings & Trainer Menu (M)") {
-                hud_state.menu_open = !hud_state.menu_open;
-            }
         });
 
     // 4. BOTTOM-LEFT PROFILE + ORNATE PARCHMENT CLOSE-UP MINIMAP
@@ -983,7 +855,7 @@ pub fn draw_hud(
                         if draw_action(ui, 0, "Take Screenshot") {
                             actions.request_screenshot = true;
                         }
-                        if draw_action(ui, 1, "Action Menu") {
+                        if draw_action(ui, 1, "Settings") {
                             hud_state.menu_open = !hud_state.menu_open;
                         }
                         if draw_action(ui, 2, "Camera View") {
