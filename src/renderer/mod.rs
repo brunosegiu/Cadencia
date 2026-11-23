@@ -67,6 +67,8 @@ pub struct ObjectUniforms {
     pub normal_mat: [[f32; 4]; 4],
     pub tint: [f32; 4],
     pub meta: [f32; 4],
+    pub skin_pose_r: [f32; 4],
+    pub skin_pose_l: [f32; 4],
 }
 
 struct GpuMeshSection {
@@ -787,6 +789,31 @@ impl LigneClaireRenderer {
         outline_weight: f32,
         crease_sensitivity: f32,
     ) -> u32 {
+        self.push_obj_uniform_skinned(
+            device,
+            idx,
+            model,
+            tint,
+            object_id,
+            outline_weight,
+            crease_sensitivity,
+            [0.0; 4],
+            [0.0; 4],
+        )
+    }
+
+    fn push_obj_uniform_skinned(
+        &mut self,
+        device: &wgpu::Device,
+        idx: usize,
+        model: Mat4,
+        tint: [f32; 4],
+        object_id: u32,
+        outline_weight: f32,
+        crease_sensitivity: f32,
+        skin_pose_r: [f32; 4],
+        skin_pose_l: [f32; 4],
+    ) -> u32 {
         if idx >= self.obj_capacity {
             let new_cap = (idx + 512).next_power_of_two();
             self.obj_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -810,6 +837,8 @@ impl LigneClaireRenderer {
                 crease_sensitivity,
                 0.0,
             ],
+            skin_pose_r,
+            skin_pose_l,
         };
         let off = idx * self.obj_align;
         let bytes = bytemuck::bytes_of(&u);
@@ -1066,7 +1095,17 @@ impl LigneClaireRenderer {
                     MaterialRole::HelmetAccent => rp.helmet_accent,
                     _ => [1.0, 1.0, 1.0, 1.0],
                 };
-                let off = self.push_obj_uniform(device, draw_count, rp.transform, tint, rp.object_id, outline_w, crease_s);
+                let off = self.push_obj_uniform_skinned(
+                    device,
+                    draw_count,
+                    rp.transform,
+                    tint,
+                    rp.object_id,
+                    outline_w,
+                    crease_s,
+                    rp.skin_pose_r,
+                    rp.skin_pose_l,
+                );
                 draw_count += 1;
                 let item = DrawItem {
                     offset_bytes: off,

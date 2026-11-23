@@ -43,6 +43,8 @@ pub struct RiderPartDraw {
     pub helmet_accent: [f32; 4],
     pub frame_color: [f32; 4],
     pub object_id: u32,
+    pub skin_pose_r: [f32; 4],
+    pub skin_pose_l: [f32; 4],
 }
 
 pub fn default_player_profile() -> RiderProfile {
@@ -153,7 +155,12 @@ pub fn build_rider_draw_parts(
         world_pos.extend(1.0),
     ) * Mat4::from_rotation_z(-lean_angle_rad);
 
-    let push = |out: &mut Vec<RiderPartDraw>, model: ModelId, local: Mat4, id_off: u32| {
+    let push_skinned = |out: &mut Vec<RiderPartDraw>,
+                        model: ModelId,
+                        local: Mat4,
+                        id_off: u32,
+                        skin_pose_r: [f32; 4],
+                        skin_pose_l: [f32; 4]| {
         out.push(RiderPartDraw {
             model,
             transform: basis * local,
@@ -164,25 +171,62 @@ pub fn build_rider_draw_parts(
             helmet_accent: profile.helmet_accent,
             frame_color: profile.frame_color,
             object_id: base_object_id + id_off,
+            skin_pose_r,
+            skin_pose_l,
         });
+    };
+    let push = |out: &mut Vec<RiderPartDraw>, model: ModelId, local: Mat4, id_off: u32| {
+        push_skinned(out, model, local, id_off, [0.0; 4], [0.0; 4]);
     };
 
     // Frame & Crank share object_id base
     push(out, ModelId::BikeFrame, Mat4::IDENTITY, 0);
 
-    // Wheels share distinct id +1 (Blender rear (0, -0.455, 0.335), front (0, +0.445, 0.335) -> wgpu (0, 0.335, +0.455 / -0.445))
+    // Wheels share distinct id +1 (Blender rear (0, -0.475, 0.340), front (0, +0.465, 0.340) -> wgpu (0, 0.340, +0.475 / -0.465))
     let wheel_rot = Mat4::from_rotation_x(-wheel_angle_rad);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.335, 0.455)) * wheel_rot, 1);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.335, -0.445)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, 0.475)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, -0.465)) * wheel_rot, 1);
 
-    // Bottom bracket: Blender (0, -0.068, 0.270) -> wgpu (0, 0.270, 0.068)
+    // Bottom bracket: Blender (0, -0.070, 0.275) -> wgpu (0, 0.275, 0.070)
     let crank_rot = Mat4::from_rotation_x(-crank_angle_rad);
-    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.270, 0.068)) * crank_rot, 0);
+    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.070)) * crank_rot, 0);
 
-    // Rider body parts (torso, thighs, calves) share id +2 so hip & knee joints stay seamless!
-    // Backpack (+3) and Head/Helmet (+4) get crisp dedicated Ligne Claire silhouette boundaries.
-    let hip_center = Vec3::new(0.0, 0.895, 0.230);
-    push(out, ModelId::RiderTorso, Mat4::from_translation(hip_center), 2);
+    // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430, l2 = 0.415)
+    let hip_center = Vec3::new(0.0, 0.965, 0.235);
+    let l1 = 0.430_f32;
+    let l2 = 0.415_f32;
+    let solve_leg_angles = |side: f32, theta_off: f32| -> [f32; 3] {
+        let th = crank_angle_rad + theta_off;
+        let hip = Vec3::new(side * 0.088, 0.965, 0.235);
+        let pedal = Vec3::new(
+            side * 0.118,
+            0.275 - 0.165 * th.sin(),
+            0.070 - 0.165 * th.cos(),
+        );
+        let ankle = pedal + Vec3::new(0.0, 0.056, 0.035);
+        let d_vec = ankle - hip;
+        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.004);
+        let base_ang = (-d_vec.z).atan2(-d_vec.y);
+        let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
+        let thigh_ang = base_ang + cos_a.acos();
+        let knee = hip + Vec3::new(0.0, -l1 * thigh_ang.cos(), -l1 * thigh_ang.sin());
+        let calf_vec = ankle - knee;
+        let calf_ang = (-calf_vec.z).atan2(-calf_vec.y);
+        let foot_ang = 0.10 * th.cos();
+        [thigh_ang, calf_ang, foot_ang]
+    };
+    let ang_r = solve_leg_angles(1.0, 0.0);
+    let ang_l = solve_leg_angles(-1.0, std::f32::consts::PI);
+
+    // Unified seamless skinned cyclist body + shorts + thighs + knees + calves + shoes (id +2)
+    push_skinned(
+        out,
+        ModelId::RiderTorso,
+        Mat4::from_translation(hip_center),
+        2,
+        [ang_r[0], ang_r[1], ang_r[2], 1.0],
+        [ang_l[0], ang_l[1], ang_l[2], 0.0],
+    );
     if profile.has_backpack {
         push(out, ModelId::RiderBackpack, Mat4::from_translation(hip_center), 3);
     }
@@ -190,49 +234,9 @@ pub fn build_rider_draw_parts(
     push(
         out,
         ModelId::RiderHeadHelmet,
-        Mat4::from_translation(Vec3::new(0.0, 1.308, -0.055)),
+        Mat4::from_translation(Vec3::new(0.0, 1.455, -0.015)),
         4,
     );
-
-    // 2-Bone Analytical Leg IK matching compact Blender cyclist_bike.blend (l1 = 0.395, l2 = 0.380)
-    let l1 = 0.395_f32;
-    let l2 = 0.380_f32;
-    for (side, theta_off) in [(1.0_f32, 0.0_f32), (-1.0_f32, std::f32::consts::PI)].into_iter() {
-        let th = crank_angle_rad + theta_off;
-        let hip = Vec3::new(side * 0.088, 0.885, 0.230);
-        let pedal = Vec3::new(
-            side * 0.118,
-            0.270 - 0.162 * th.sin(),
-            0.068 - 0.162 * th.cos(),
-        );
-        // Ankle sits slightly behind (+Z) and above (+Y) pedal spindle
-        let ankle = pedal + Vec3::new(0.0, 0.052, 0.032);
-        let d_vec = ankle - hip;
-        let d = d_vec.length().clamp(0.12, l1 + l2 - 0.006);
-
-        // Solve in Y-Z plane (base_ang from -Y toward -Z forward)
-        let base_ang = (-d_vec.z).atan2(-d_vec.y);
-        let cos_a = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
-        let a = cos_a.acos();
-        let thigh_ang = base_ang + a; // knee bends forward (-Z)
-
-        let knee = hip + Vec3::new(0.0, -l1 * thigh_ang.cos(), -l1 * thigh_ang.sin());
-        let calf_vec = ankle - knee;
-        let calf_ang = (-calf_vec.z).atan2(-calf_vec.y);
-
-        push(
-            out,
-            ModelId::RiderThigh,
-            Mat4::from_translation(hip) * Mat4::from_rotation_x(thigh_ang),
-            2,
-        );
-        push(
-            out,
-            ModelId::RiderCalfShoe,
-            Mat4::from_translation(knee) * Mat4::from_rotation_x(calf_ang),
-            2,
-        );
-    }
 }
 
 #[allow(dead_code)]

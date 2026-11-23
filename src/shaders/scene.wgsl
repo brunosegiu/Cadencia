@@ -18,6 +18,8 @@ struct ObjectUniforms {
     normal_mat: mat4x4<f32>,
     tint: vec4<f32>,
     obj_info: vec4<f32>, // x = object_id/255, y = outline_weight, z = crease_sens, w = mat_override
+    skin_pose_r: vec4<f32>, // (thigh_ang_r, calf_ang_r, foot_ang_r, is_skinned)
+    skin_pose_l: vec4<f32>, // (thigh_ang_l, calf_ang_l, foot_ang_l, 0.0)
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
@@ -67,10 +69,64 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+fn rot_x_vec(v: vec3<f32>, ang: f32) -> vec3<f32> {
+    let c = cos(ang);
+    let s = sin(ang);
+    return vec3<f32>(v.x, v.y * c - v.z * s, v.y * s + v.z * c);
+}
+
 @vertex
 fn vs_scene(in: VertexInput) -> SceneOut {
-    let wp = obj.model * vec4<f32>(in.pos, 1.0);
-    let wn = normalize((obj.normal_mat * vec4<f32>(in.normal, 0.0)).xyz);
+    var local_pos = in.pos;
+    var local_nrm = in.normal;
+
+    // 4-bone Linear Blend Skinning for unified seamless cyclist character (Pelvis -> Thigh -> Calf -> Foot)
+    if (obj.skin_pose_r.w > 0.5) {
+        let x = local_pos.x;
+        let y_bl = -local_pos.z;
+        let z_bl = local_pos.y;
+        if (!(z_bl > 0.035 || (z_bl > -0.14 && y_bl > 0.15))) {
+            let angles = select(obj.skin_pose_l.xyz, obj.skin_pose_r.xyz, x >= 0.0);
+            let side = select(-1.0, 1.0, x >= 0.0);
+            let th_ang = angles.x;
+            let ca_ang = angles.y;
+            let fo_ang = angles.z;
+
+            let w_hip_thigh = (1.0 - smoothstep(-0.095, 0.025, z_bl)) * smoothstep(0.010, 0.055, abs(x));
+            let w_pelvis = 1.0 - w_hip_thigh;
+            let w_knee_calf = 1.0 - smoothstep(-0.485, -0.375, z_bl);
+            let w_ankle_foot = 1.0 - smoothstep(-0.865, -0.815, z_bl);
+
+            let wt_pelvis = w_pelvis;
+            let wt_thigh  = w_hip_thigh * (1.0 - w_knee_calf);
+            let wt_calf   = w_hip_thigh * w_knee_calf * (1.0 - w_ankle_foot);
+            let wt_foot   = w_hip_thigh * w_knee_calf * w_ankle_foot;
+
+            let rest_hip   = vec3<f32>(side * 0.088,  0.000, 0.0);
+            let rest_knee  = vec3<f32>(side * 0.088, -0.430, 0.0);
+            let rest_ankle = vec3<f32>(side * 0.088, -0.845, 0.0);
+
+            let posed_hip   = rest_hip;
+            let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(th_ang), -0.430 * sin(th_ang));
+            let posed_ankle = posed_knee + vec3<f32>(0.0, -0.415 * cos(ca_ang), -0.415 * sin(ca_ang));
+
+            let p_pelvis = local_pos;
+            let p_thigh  = posed_hip   + rot_x_vec(local_pos - rest_hip,   th_ang);
+            let p_calf   = posed_knee  + rot_x_vec(local_pos - rest_knee,  ca_ang);
+            let p_foot   = posed_ankle + rot_x_vec(local_pos - rest_ankle, fo_ang);
+
+            let n_pelvis = local_nrm;
+            let n_thigh  = rot_x_vec(local_nrm, th_ang);
+            let n_calf   = rot_x_vec(local_nrm, ca_ang);
+            let n_foot   = rot_x_vec(local_nrm, fo_ang);
+
+            local_pos = wt_pelvis * p_pelvis + wt_thigh * p_thigh + wt_calf * p_calf + wt_foot * p_foot;
+            local_nrm = normalize(wt_pelvis * n_pelvis + wt_thigh * n_thigh + wt_calf * n_calf + wt_foot * n_foot);
+        }
+    }
+
+    let wp = obj.model * vec4<f32>(local_pos, 1.0);
+    let wn = normalize((obj.normal_mat * vec4<f32>(local_nrm, 0.0)).xyz);
     let vn = normalize((frame.view_mat * vec4<f32>(wn, 0.0)).xyz);
     let vp = frame.view_mat * wp;
 

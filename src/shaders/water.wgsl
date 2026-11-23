@@ -18,6 +18,8 @@ struct ObjectUniforms {
     normal_mat: mat4x4<f32>,
     tint: vec4<f32>,
     obj_info: vec4<f32>,
+    skin_pose_r: vec4<f32>,
+    skin_pose_l: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
