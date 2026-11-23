@@ -1044,8 +1044,8 @@ pub fn draw_hud(
 
                 ui.separator();
                 ui.label(egui::RichText::new("Trainer Simulator Controls").strong());
-                ui.add(egui::Slider::new(&mut sim.target_power_w, 40.0..=600.0).text("Power (W)"));
-                ui.add(egui::Slider::new(&mut sim.target_cadence_rpm, 35.0..=130.0).text("Cadence (RPM)"));
+                ui.add(egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0).text("Power (W)"));
+                ui.add(egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0).text("Cadence (RPM)"));
                 ui.add(egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0).text("Heart Rate (BPM)"));
                 ui.add(egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0).text("Rider Weight (kg)"));
                 ui.horizontal(|ui| {
@@ -1805,8 +1805,8 @@ fn draw_settings_screen(
                 cols[1].small(egui::RichText::new(format!("Status: {ble_status}")).color(Color32::from_rgb(200, 196, 184)));
                 cols[1].add_space(10.0);
                 cols[1].add(egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0).text("Rider Weight (kg)"));
-                cols[1].add(egui::Slider::new(&mut sim.target_power_w, 40.0..=600.0).text("Sim Power (W)"));
-                cols[1].add(egui::Slider::new(&mut sim.target_cadence_rpm, 35.0..=130.0).text("Sim Cadence (RPM)"));
+                cols[1].add(egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0).text("Sim Power (W)"));
+                cols[1].add(egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0).text("Sim Cadence (RPM)"));
                 cols[1].add(egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0).text("Sim Heart Rate (BPM)"));
                 cols[1].add_space(6.0);
                 cols[1].horizontal(|ui| {

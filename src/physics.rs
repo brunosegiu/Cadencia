@@ -32,6 +32,7 @@ pub struct RiderPhysicsState {
     pub crank_angle_rad: f32,
     pub wheel_angle_rad: f32,
     pub lean_angle_rad: f32,
+    pub animated_cadence_rpm: f32,
     pub draft_factor: f32,
     pub avg_power_w: f32,
     pub elapsed_s: f32,
@@ -63,6 +64,7 @@ impl RiderPhysicsState {
             crank_angle_rad: -1.35,
             wheel_angle_rad: 0.0,
             lean_angle_rad: 0.0,
+            animated_cadence_rpm: 90.0,
             draft_factor: 0.0,
             avg_power_w: 92.0,
             elapsed_s: 14.0 * 60.0 + 32.0,
@@ -72,6 +74,17 @@ impl RiderPhysicsState {
             power_samples_count: 872,
             drops_accum: 0.0,
         }
+    }
+}
+
+/// Heuristic cadence estimator (RPM) from power (W) for trainers that do not output cadence (cadence == 0).
+pub fn estimate_cadence_from_power(power_w: f32) -> f32 {
+    if power_w <= 2.0 {
+        0.0
+    } else {
+        // Smooth nonlinear curve: ~56 RPM at 20W, ~81 RPM at 120W, ~88 RPM at 185W, ~94 RPM at 250W, up to 112 RPM at sprint watts
+        let norm = ((power_w - 20.0).max(0.0) / 340.0).clamp(0.0, 1.5);
+        (56.0 + 46.0 * norm.sqrt()).clamp(48.0, 112.0)
     }
 }
 
@@ -125,9 +138,16 @@ pub fn step_physics(
         state.elevation_gain_m += dh;
     }
 
-    // Wheel rotation (radius = 0.34 m) and crank rotation from cadence
+    // Wheel rotation (radius = 0.34 m) and crank rotation from cadence (or power heuristic if trainer outputs 0 cadence)
     state.wheel_angle_rad = (state.wheel_angle_rad + ds / 0.34).rem_euclid(std::f32::consts::TAU);
-    let omega_crank = (cadence_rpm / 60.0) * std::f32::consts::TAU;
+    let target_anim_cadence = if cadence_rpm > 0.5 {
+        cadence_rpm
+    } else {
+        estimate_cadence_from_power(power_w)
+    };
+    state.animated_cadence_rpm +=
+        (target_anim_cadence - state.animated_cadence_rpm) * (dt * 5.0).min(1.0);
+    let omega_crank = (state.animated_cadence_rpm.max(0.0) / 60.0) * std::f32::consts::TAU;
     state.crank_angle_rad = (state.crank_angle_rad + omega_crank * dt).rem_euclid(std::f32::consts::TAU);
 
     // Banking lean into curves
@@ -237,5 +257,26 @@ mod tests {
             step_physics(0.05, 250.0, 92.0, 0.0, 0.0, d, &params, &mut draft);
         }
         assert!(draft.speed_mps > solo.speed_mps);
+    }
+
+    #[test]
+    fn zero_cadence_trainer_animates_crank_from_power_heuristic() {
+        assert_eq!(estimate_cadence_from_power(0.0), 0.0);
+        let cad_low = estimate_cadence_from_power(90.0);
+        let cad_mid = estimate_cadence_from_power(200.0);
+        let cad_high = estimate_cadence_from_power(380.0);
+        assert!(cad_low > 65.0 && cad_low < cad_mid);
+        assert!(cad_mid < cad_high && cad_high <= 112.0);
+
+        let params = PhysicsParams::default();
+        let mut st = RiderPhysicsState::new_hero_default(0.0, 0.0, 0.0);
+        st.crank_angle_rad = 0.0;
+        st.animated_cadence_rpm = 0.0;
+        // Step with 0 reported cadence but 200W power
+        for _ in 0..20 {
+            step_physics(0.05, 200.0, 0.0, 0.0, 0.0, 0.0, &params, &mut st);
+        }
+        assert!(st.animated_cadence_rpm > 75.0);
+        assert!(st.crank_angle_rad > 0.1);
     }
 }

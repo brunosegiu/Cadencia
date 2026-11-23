@@ -69,9 +69,14 @@ impl HardwareProvider for SimulatedHardware {
         } else {
             -(self.current_grade_pct * 0.35).clamp(-6.0, 4.0)
         };
+        let cadence_rpm = if self.target_cadence_rpm <= 0.5 {
+            0.0
+        } else {
+            (self.target_cadence_rpm + grade_cad_adj + wobble_cad).clamp(0.0, 145.0)
+        };
         TelemetrySample {
             power_w: (base_w + wobble_w).max(0.0),
-            cadence_rpm: (self.target_cadence_rpm + grade_cad_adj + wobble_cad).clamp(0.0, 145.0),
+            cadence_rpm,
             heart_rate_bpm: self.target_hr_bpm.clamp(45.0, 210.0),
             speed_mps: None, // Computed from physics engine
             connected: true,
