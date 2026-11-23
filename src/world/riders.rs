@@ -170,18 +170,18 @@ pub fn build_rider_draw_parts(
     // Frame & Crank share object_id base
     push(out, ModelId::BikeFrame, Mat4::IDENTITY, 0);
 
-    // Wheels share distinct id +1 (Blender (0, +-0.505, 0.340) -> wgpu (0, 0.340, -+0.505))
+    // Wheels share distinct id +1 (Blender rear (0, -0.455, 0.335), front (0, +0.445, 0.335) -> wgpu (0, 0.335, +0.455 / -0.445))
     let wheel_rot = Mat4::from_rotation_x(-wheel_angle_rad);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, 0.505)) * wheel_rot, 1);
-    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.340, -0.505)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.335, 0.455)) * wheel_rot, 1);
+    push(out, ModelId::BikeWheel, Mat4::from_translation(Vec3::new(0.0, 0.335, -0.445)) * wheel_rot, 1);
 
-    // Bottom bracket: Blender (0, -0.075, 0.275) -> wgpu (0, 0.275, 0.075)
+    // Bottom bracket: Blender (0, -0.068, 0.270) -> wgpu (0, 0.270, 0.068)
     let crank_rot = Mat4::from_rotation_x(-crank_angle_rad);
-    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.075)) * crank_rot, 0);
+    push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.270, 0.068)) * crank_rot, 0);
 
     // Rider body parts (torso, thighs, calves) share id +2 so hip & knee joints stay seamless!
     // Backpack (+3) and Head/Helmet (+4) get crisp dedicated Ligne Claire silhouette boundaries.
-    let hip_center = Vec3::new(0.0, 0.950, 0.250);
+    let hip_center = Vec3::new(0.0, 0.895, 0.230);
     push(out, ModelId::RiderTorso, Mat4::from_translation(hip_center), 2);
     if profile.has_backpack {
         push(out, ModelId::RiderBackpack, Mat4::from_translation(hip_center), 3);
@@ -190,20 +190,20 @@ pub fn build_rider_draw_parts(
     push(
         out,
         ModelId::RiderHeadHelmet,
-        Mat4::from_translation(Vec3::new(0.0, 1.405, -0.095)),
+        Mat4::from_translation(Vec3::new(0.0, 1.308, -0.055)),
         4,
     );
 
-    // 2-Bone Analytical Leg IK matching Blender cyclist_bike.blend (l1 = 0.425, l2 = 0.405)
-    let l1 = 0.425_f32;
-    let l2 = 0.405_f32;
+    // 2-Bone Analytical Leg IK matching compact Blender cyclist_bike.blend (l1 = 0.395, l2 = 0.380)
+    let l1 = 0.395_f32;
+    let l2 = 0.380_f32;
     for (side, theta_off) in [(1.0_f32, 0.0_f32), (-1.0_f32, std::f32::consts::PI)].into_iter() {
         let th = crank_angle_rad + theta_off;
-        let hip = Vec3::new(side * 0.088, 0.940, 0.250);
+        let hip = Vec3::new(side * 0.088, 0.885, 0.230);
         let pedal = Vec3::new(
             side * 0.118,
-            0.275 - 0.170 * th.sin(),
-            0.075 - 0.170 * th.cos(),
+            0.270 - 0.162 * th.sin(),
+            0.068 - 0.162 * th.cos(),
         );
         // Ankle sits slightly behind (+Z) and above (+Y) pedal spindle
         let ankle = pedal + Vec3::new(0.0, 0.052, 0.032);
