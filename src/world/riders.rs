@@ -137,6 +137,7 @@ pub fn build_rider_draw_parts(
     wheel_angle_rad: f32,
     crank_angle_rad: f32,
     lean_angle_rad: f32,
+    time_s: f32,
     profile: &RiderProfile,
     base_object_id: u32,
     out: &mut Vec<RiderPartDraw>,
@@ -197,7 +198,7 @@ pub fn build_rider_draw_parts(
     let l2 = 0.415_f32;
     let solve_leg_angles = |side: f32, theta_off: f32| -> [f32; 3] {
         let th = crank_angle_rad + theta_off;
-        let hip = Vec3::new(side * 0.108, 0.965, 0.235);
+        let hip = Vec3::new(side * 0.105, 0.965, 0.235);
         let pedal = Vec3::new(
             side * 0.118,
             0.275 - 0.165 * th.sin(),
@@ -218,6 +219,10 @@ pub fn build_rider_draw_parts(
     let ang_r = solve_leg_angles(1.0, 0.0);
     let ang_l = solve_leg_angles(-1.0, std::f32::consts::PI);
 
+    // Continuous pedaling + idle breathing/sway animation phase for torso, shoulders, elbows, and neck/head!
+    let rider_seed = (base_object_id as f32) * 0.37;
+    let anim_phase = crank_angle_rad + time_s * 2.1 + rider_seed;
+
     // Unified seamless skinned cyclist body + shorts + thighs + knees + calves + shoes (id +2)
     push_skinned(
         out,
@@ -225,16 +230,38 @@ pub fn build_rider_draw_parts(
         Mat4::from_translation(hip_center),
         2,
         [ang_r[0], ang_r[1], ang_r[2], 1.0],
-        [ang_l[0], ang_l[1], ang_l[2], 0.0],
+        [ang_l[0], ang_l[1], ang_l[2], anim_phase],
     );
     if profile.has_backpack {
-        push(out, ModelId::RiderBackpack, Mat4::from_translation(hip_center), 3);
+        // Backpack follows upper-body sway & breathing heave via skin_pose_r.w = 2.0
+        push_skinned(
+            out,
+            ModelId::RiderBackpack,
+            Mat4::from_translation(hip_center),
+            3,
+            [0.0, 0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0, anim_phase],
+        );
     }
+
+    // Neck & Head idle + pedaling animation (shoulder-follow sway, breathing bob, look-around yaw, nod pitch, counter-roll)
+    let head_sway_x = 0.013 * anim_phase.sin();
+    let head_bob_y  = 0.009 * (anim_phase * 2.0).sin() + 0.005 * (anim_phase * 0.85).cos();
+    let head_fwd_z  = -0.007 * (anim_phase * 2.0).sin();
+    let head_yaw    = 0.065 * (time_s * 0.9 + rider_seed).sin() + 0.028 * anim_phase.cos() - lean_angle_rad * 0.35;
+    let head_pitch  = 0.038 * (anim_phase * 2.0).cos() + 0.022 * (time_s * 1.7 + rider_seed).sin();
+    let head_roll   = -0.042 * anim_phase.sin() + 0.018 * (time_s * 1.3 + rider_seed).cos();
+
+    let head_xform = Mat4::from_translation(Vec3::new(
+        head_sway_x,
+        1.455 + head_bob_y,
+        -0.015 + head_fwd_z,
+    )) * Mat4::from_euler(glam::EulerRot::YXZ, head_yaw, head_pitch, head_roll);
 
     push(
         out,
         ModelId::RiderHeadHelmet,
-        Mat4::from_translation(Vec3::new(0.0, 1.455, -0.015)),
+        head_xform,
         4,
     );
 }

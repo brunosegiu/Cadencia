@@ -19,6 +19,9 @@ pub enum CameraMode {
     Wide,
     Side,
     FirstPerson,
+    TurnaroundBack,
+    TurnaroundBack34,
+    TurnaroundFront34,
 }
 
 impl CameraMode {
@@ -29,6 +32,9 @@ impl CameraMode {
             CameraMode::Wide => "Wide",
             CameraMode::Side => "Side",
             CameraMode::FirstPerson => "First Person",
+            CameraMode::TurnaroundBack => "Back",
+            CameraMode::TurnaroundBack34 => "3/4 Back",
+            CameraMode::TurnaroundFront34 => "3/4 Front",
         }
     }
 
@@ -37,8 +43,10 @@ impl CameraMode {
             CameraMode::Chase => CameraMode::Close,
             CameraMode::Close => CameraMode::Wide,
             CameraMode::Wide => CameraMode::Side,
-            CameraMode::Side => CameraMode::FirstPerson,
-            CameraMode::FirstPerson => CameraMode::Chase,
+            CameraMode::Side => CameraMode::TurnaroundBack34,
+            CameraMode::TurnaroundBack34 => CameraMode::TurnaroundFront34,
+            CameraMode::TurnaroundFront34 => CameraMode::FirstPerson,
+            CameraMode::FirstPerson | CameraMode::TurnaroundBack => CameraMode::Chase,
         }
     }
 }
@@ -892,9 +900,24 @@ impl LigneClaireRenderer {
                 56.0,
             ),
             CameraMode::Side => (
-                player_pos + right * 2.75 + up * 1.16 - forward * 0.30,
-                player_pos + up * 1.00,
-                48.0,
+                player_pos + right * 2.75 + up * 1.16 - forward * 0.10,
+                player_pos + up * 0.96,
+                46.0,
+            ),
+            CameraMode::TurnaroundBack => (
+                player_pos - forward * 3.10 + up * 1.15,
+                player_pos + up * 0.94,
+                44.0,
+            ),
+            CameraMode::TurnaroundBack34 => (
+                player_pos - forward * 2.25 + right * 2.15 + up * 1.25,
+                player_pos + up * 0.94,
+                45.0,
+            ),
+            CameraMode::TurnaroundFront34 => (
+                player_pos + forward * 2.35 + right * 1.75 + up * 1.22,
+                player_pos + up * 0.94,
+                45.0,
             ),
             CameraMode::FirstPerson => (
                 player_pos + up * 1.58 + forward * 0.25,
@@ -1050,6 +1073,7 @@ impl LigneClaireRenderer {
             player_wheel_rad,
             player_crank_rad,
             player_lean_rad,
+            time_s,
             player_profile,
             230,
             &mut rider_parts,
@@ -1065,6 +1089,7 @@ impl LigneClaireRenderer {
                     ai.wheel_angle_rad,
                     ai.crank_angle_rad,
                     ai.lean_angle_rad,
+                    time_s,
                     &ai.profile,
                     base_id,
                     &mut rider_parts,

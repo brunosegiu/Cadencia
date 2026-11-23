@@ -44,6 +44,9 @@ fn main() {
                         "close" => CameraMode::Close,
                         "wide" => CameraMode::Wide,
                         "side" => CameraMode::Side,
+                        "back" => CameraMode::TurnaroundBack,
+                        "34_back" | "back34" => CameraMode::TurnaroundBack34,
+                        "34_front" | "front34" => CameraMode::TurnaroundFront34,
                         "fp" | "first_person" => CameraMode::FirstPerson,
                         _ => CameraMode::Chase,
                     };
