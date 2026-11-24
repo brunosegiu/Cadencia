@@ -17,7 +17,11 @@ All AI coding agents and contributors must follow these rules whenever modifying
      - `powershell -ExecutionPolicy Bypass -File .\build_android_apk.ps1` (builds `aarch64-linux-android` release `libcadence_lib.so` and packages/signs `cadence.apk`)
 2. **Keep Library and Binary Target Names Distinct (`Cargo.toml`):**
    - In `Cargo.toml`, `[lib]` must remain `name = "cadence_lib"` (`crate-type = ["cdylib", "rlib"]`) and `[[bin]]` must remain `name = "cadence"`. Never give `[lib]` and `[[bin]]` the same name, as Windows MSVC builds will emit `cadence.pdb` output filename collision warnings.
-3. **Mandatory 4-Step Verification Before Every Commit:**
+3. **ALWAYS Use the Blender MCP for 3D Modeling (NEVER Procedural Rust Meshes for Props/Models):**
+   - All 3D models (vegetation, trees, palms, bushes, rocks, animals, buildings, vehicles, avatars, props) **MUST** be created and exported as `.glb` files into `assets/models/` using the **Blender MCP** (`execute_blender_code` / `blender` MCP tools) and loaded via `load_glb` in `src/assets.rs`.
+   - **NEVER** write procedural mesh-building code in Rust to generate 3D prop, vegetation, rock, or animal models.
+   - When adding species/prop variations (e.g., 10 variants of a tree, bush, palm, or rock species, or animals like horses, cows, sheep, mulitas), author and export the `.glb` models in Blender via the Blender MCP.
+4. **Mandatory 4-Step Verification Before Every Commit:**
    - **Step 1 — Unit Tests:** Run `cargo test --offline` (all physics, spline, octree frustum culling, TAA Halton jitter, and BLE FTMS/CPS/CSC/HRS packet parser tests must pass with zero warnings).
    - **Step 2 — WebAssembly Target Check:** Run `cargo check --offline --target wasm32-unknown-unknown --no-default-features` to ensure platform-agnostic WebGPU/WASM compatibility.
    - **Step 3 — Visual Screenshot Verification:** Render and visually inspect screenshots via the built-in headless renderer (which warms up 8 frames for full 8-phase Halton TAA convergence):

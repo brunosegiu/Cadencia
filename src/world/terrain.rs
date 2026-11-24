@@ -384,14 +384,17 @@ fn terrain_offset_y(biome: BiomeId, lat: f32, dist_m: f32, road_hw: f32) -> f32 
             let edge = (lat.abs() - road_hw).max(0.0);
             if edge <= 0.0 {
                 0.0
+            } else if lat < 0.0 {
+                // Gentle open meadow verge on left rising gradually into rolling distant hills
+                let near_blend = (edge / 32.0).min(1.0);
+                let far_rise = (edge - 12.0).max(0.0).powf(0.88) * 0.11;
+                let roll = ((dist_m * 0.018 - edge * 0.035).sin() * 3.8 + w1 * 1.4) * near_blend * near_blend;
+                far_rise + roll
             } else {
-                let blend = (edge / 14.0).min(1.0);
-                let hill = (w3 * 8.0 + w1 * 3.8 + w2 * 1.1) * blend;
-                let gentle_slope = if lat < 0.0 {
-                    edge.powf(0.92) * 0.09
-                } else {
-                    edge.powf(0.92) * 0.04 + (dist_m * 0.022).cos() * 3.2 * blend
-                };
+                // Gently undulating estancia pasture on right
+                let blend = (edge / 26.0).min(1.0);
+                let hill = (w3 * 3.6 + w1 * 1.8 + w2 * 0.6) * blend * blend;
+                let gentle_slope = (edge - 8.0).max(0.0).powf(0.88) * 0.06;
                 hill + gentle_slope
             }
         }
@@ -686,7 +689,7 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
     let mut wire_indices = Vec::new();
     let wire_lanes: Vec<f32> = match biome {
         BiomeId::MountainClimb => vec![road_hw + 0.35],
-        BiomeId::RollingRuralGravel => vec![-(road_hw + 0.45), road_hw + 0.45],
+        BiomeId::RollingRuralGravel => vec![road_hw + 0.45],
         BiomeId::CoastalPromenade => vec![],
     };
     for wire_lat in wire_lanes {
@@ -1107,78 +1110,388 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         }
         BiomeId::RollingRuralGravel => {
             let total = spline.total_length_m;
+            let hero_d = spline.hero_start_dist_m;
+
+            let pick_rock = |h: u32| -> ModelId {
+                let v = ((h / 3) % 10) as u8;
+                match h % 3 {
+                    0 => ModelId::CampoRockGranite(v),
+                    1 => ModelId::CampoRockSlate(v),
+                    _ => ModelId::CampoRockCluster(v),
+                }
+            };
+            let pick_tree = |h: u32| -> ModelId {
+                let v = ((h / 3) % 10) as u8;
+                match h % 3 {
+                    0 => ModelId::TreeEucalyptus(v),
+                    1 => ModelId::TreeOmbu(v),
+                    _ => ModelId::TreeCeibo(v),
+                }
+            };
+
+            // 1. Right-side wooden post fence & organic variable-step roadside vegetation
             let mut d = 0.0_f32;
             let mut idx = 0_u32;
             while d < total {
                 let s = spline.sample(d);
                 let yaw = (-s.tangent.x).atan2(-s.tangent.z);
-                for &side in &[-1.0_f32, 1.0] {
-                    let f_lat = side * (road_hw + 0.45);
-                    let fy = terrain_offset_y(biome, f_lat, d, road_hw);
+
+                // Right-side wooden fence post (matches continuous 3-strand wire at +road_hw + 0.45)
+                let f_lat = road_hw + 0.45;
+                let fy = terrain_offset_y(biome, f_lat, d, road_hw);
+                let post_tilt = (hash_u32(idx * 19 + 3) - 0.5) * 0.06;
+                push_prop(
+                    ModelId::FencePost,
+                    s.pos + s.right * f_lat + Vec3::Y * (fy - 0.05),
+                    yaw + post_tilt,
+                    Vec3::splat(0.96 + hash_u32(idx * 29) * 0.10),
+                    [1.0; 4],
+                    0.95,
+                    0.9,
+                    true,
+                );
+
+                // Left open verge: Ceibo red-flowering bushes, Pampas Cortadera white plumes, Chirca scrub & wildflowers
+                // Leave the hero meadow vista (hero_d + 4m .. hero_d + 72m) open to the curated foreground clumps & grazing herds
+                let rel_hero = (d - hero_d).rem_euclid(total);
+                let in_hero_vista = (4.0..76.0).contains(&rel_hero);
+                let h_l0 = idx.wrapping_mul(73).wrapping_add(11);
+                let r_l0 = hash_u32(h_l0);
+                let r_l1 = hash_u32(h_l0 + 17);
+                if !in_hero_vista && r_l0 > 0.52 {
+                    let lat_v = -(road_hw + 1.25 + r_l1 * 3.8);
+                    let y_v = terrain_offset_y(biome, lat_v, d, road_hw);
+                    let v_idx = ((h_l0 / 7) % 10) as u8;
+                    let (v_model, v_scale) = if r_l0 > 0.82 {
+                        (ModelId::CeiboBush(v_idx), 0.82 + r_l1 * 0.35)
+                    } else if r_l0 > 0.68 {
+                        (ModelId::PampasCortadera(v_idx), 0.88 + r_l1 * 0.35)
+                    } else {
+                        (ModelId::ChircaBush(v_idx), 0.78 + r_l1 * 0.35)
+                    };
                     push_prop(
-                        ModelId::FencePost,
-                        s.pos + s.right * f_lat + Vec3::Y * (fy - 0.05),
-                        yaw,
-                        Vec3::ONE,
+                        v_model,
+                        s.pos + s.right * lat_v + Vec3::Y * (y_v - 0.08),
+                        r_l0 * 6.28,
+                        Vec3::splat(v_scale),
                         [1.0; 4],
-                        0.95,
-                        0.9,
+                        0.85,
+                        0.0,
                         true,
                     );
-                    let r = hash_u32(idx * 37 + if side < 0.0 { 1 } else { 2 });
-                    if idx % 2 == 0 {
-                        let lat_fl = side * (road_hw + 0.7 + r * 1.3);
+                }
+
+                // Right fence-line flora: Small Butiá palms, Chirca bushes & Cortaderas just behind the fence
+                let h_r0 = idx.wrapping_mul(97).wrapping_add(23);
+                let r_r0 = hash_u32(h_r0);
+                let r_r1 = hash_u32(h_r0 + 31);
+                if !in_hero_vista && r_r0 > 0.48 {
+                    let lat_rf = road_hw + 1.55 + r_r1 * 4.5;
+                    let y_rf = terrain_offset_y(biome, lat_rf, d, road_hw);
+                    let v_idx = ((h_r0 / 5) % 10) as u8;
+                    let (rf_model, rf_scale) = if r_r0 > 0.76 {
+                        (ModelId::SmallPalm(v_idx), 0.85 + r_r1 * 0.38)
+                    } else if r_r0 > 0.60 {
+                        (ModelId::ChircaBush(v_idx), 0.78 + r_r1 * 0.38)
+                    } else {
+                        (ModelId::PampasCortadera(v_idx), 0.85 + r_r1 * 0.32)
+                    };
+                    push_prop(
+                        rf_model,
+                        s.pos + s.right * lat_rf + Vec3::Y * (y_rf - 0.10),
+                        r_r0 * 6.28,
+                        Vec3::splat(rf_scale),
+                        [1.0; 4],
+                        0.85,
+                        0.0,
+                        true,
+                    );
+                }
+
+                // Roadside wildflower tufts on both verges
+                for &side in &[-1.0_f32, 1.0] {
+                    let rf = hash_u32(idx * 43 + if side < 0.0 { 3 } else { 9 });
+                    if rf > 0.42 {
+                        let lat_fl = side * (road_hw + 0.55 + rf * 1.35);
                         let y_fl = terrain_offset_y(biome, lat_fl, d, road_hw);
                         push_prop(
                             ModelId::WildflowerTuft,
-                            s.pos + s.right * lat_fl + Vec3::Y * (y_fl - 0.08),
-                            r * 6.28,
-                            Vec3::splat(1.0 + r * 0.45),
+                            s.pos + s.right * lat_fl + Vec3::Y * (y_fl - 0.06),
+                            rf * 6.28,
+                            Vec3::splat(0.85 + rf * 0.45),
                             [1.0; 4],
                             0.55,
-                            0.3,
+                            0.0,
                             false,
                         );
                     }
-                    if idx % 2 == 0 {
-                        let lat_b = side * (road_hw + 2.6 + r * 18.0);
-                        let y_b = terrain_offset_y(biome, lat_b, d, road_hw);
-                        let model = if r > 0.62 {
-                            ModelId::TreeCanopy
-                        } else if r > 0.25 {
-                            ModelId::BushCluster
+                }
+
+                // Mulitas (seven-banded armadillos) foraging along the grassy roadside bank
+                let r_mul = hash_u32(idx * 157 + 7);
+                if r_mul > 0.86 {
+                    let side = if idx % 3 == 0 { 1.0 } else { -1.0 };
+                    let lat_m = side * (road_hw + 0.85 + (r_mul - 0.86) * 18.0);
+                    let y_m = terrain_offset_y(biome, lat_m, d, road_hw);
+                    let m_var = (idx % 4) as u8;
+                    push_prop(
+                        ModelId::Mulita(m_var),
+                        s.pos + s.right * lat_m + Vec3::Y * (y_m - 0.02),
+                        yaw + (hash_u32(idx * 61) - 0.5) * 2.6,
+                        Vec3::splat(1.10 + (r_mul - 0.86) * 1.5),
+                        [1.0; 4],
+                        0.88,
+                        0.0,
+                        true,
+                    );
+                }
+
+                d += 4.0;
+                idx += 1;
+            }
+
+            // 2. Non-repetitive geological rock veins & boulder clusters (Poisson-like irregular clusters, never periodic!)
+            let mut rock_d = 6.0_f32;
+            let mut r_seed = 500_u32;
+            while rock_d < total {
+                r_seed = r_seed.wrapping_add(1);
+                let h0 = hash_u32(r_seed * 193 + 17);
+                let h1 = hash_u32(r_seed * 251 + 41);
+                let h2 = hash_u32(r_seed * 313 + 89);
+
+                // Irregular geological vein spacing (varies between 5m and 34m)
+                let vein_density = (rock_d * 0.037).sin() * 0.5 + (rock_d * 0.091).cos() * 0.5;
+                if vein_density > -0.25 {
+                    let side = if h0 > 0.36 { -1.0_f32 } else { 1.0_f32 };
+                    let center_lat = side * (road_hw + 3.2 + h1 * 38.0);
+                    let cluster_count = 1 + ((h2 * 3.8) as u32);
+
+                    for c_i in 0..cluster_count {
+                        let cs = r_seed * 37 + c_i * 19;
+                        let off_d = (hash_u32(cs + 1) - 0.5) * 6.5;
+                        let off_lat = (hash_u32(cs + 2) - 0.5) * 5.8;
+                        let cur_d = (rock_d + off_d).rem_euclid(total);
+                        let cur_lat = if side < 0.0 {
+                            (center_lat + off_lat).min(-(road_hw + 1.8))
                         } else {
-                            ModelId::BoulderMedium
+                            (center_lat + off_lat).max(road_hw + 2.2)
                         };
+                        let sc_sample = spline.sample(cur_d);
+                        let y_r = terrain_offset_y(biome, cur_lat, cur_d, road_hw);
+                        let rock_model = pick_rock(cs + c_i * 7);
+                        let sx = 0.75 + hash_u32(cs + 3) * 0.85;
+                        let sy = 0.70 + hash_u32(cs + 4) * 0.75;
+                        let sz = 0.75 + hash_u32(cs + 5) * 0.85;
                         push_prop(
-                            model,
-                            s.pos + s.right * lat_b + Vec3::Y * (y_b - 0.42),
-                            r * 6.28,
-                            Vec3::splat(0.95 + r * 0.85),
+                            rock_model,
+                            sc_sample.pos + sc_sample.right * cur_lat + Vec3::Y * (y_r - 0.18),
+                            hash_u32(cs + 6) * 6.28,
+                            Vec3::new(sx, sy, sz),
                             [1.0; 4],
-                            0.80,
-                            0.30,
+                            0.84,
+                            0.0,
                             true,
                         );
                     }
                 }
-                if idx % 14 == 4 {
-                    let side = if idx % 28 == 4 { -1.0 } else { 1.0 };
-                    let lat_r = side * (road_hw + 21.0);
-                    let y_r = terrain_offset_y(biome, lat_r, d, road_hw);
+                rock_d += 5.5 + h0 * h1 * 26.0;
+            }
+
+            // 3. Natural Monte Criollo tree groves (Eucalyptus, Ombu, Ceibo & Small Palms) with irregular spacing
+            let mut grove_d = 10.0_f32;
+            let mut g_seed = 1200_u32;
+            while grove_d < total {
+                g_seed = g_seed.wrapping_add(1);
+                let h0 = hash_u32(g_seed * 167 + 29);
+                let h1 = hash_u32(g_seed * 229 + 53);
+                let h2 = hash_u32(g_seed * 293 + 71);
+
+                let side = if h0 > 0.44 { 1.0_f32 } else { -1.0_f32 };
+                let base_lat = side * (road_hw + 5.5 + h1 * 48.0);
+                let trees_in_grove = 1 + ((h2 * 4.2) as u32);
+
+                for t_i in 0..trees_in_grove {
+                    let ts = g_seed * 59 + t_i * 23;
+                    let td = (grove_d + (hash_u32(ts + 1) - 0.5) * 14.0).rem_euclid(total);
+                    let tlat = if side < 0.0 {
+                        (base_lat + (hash_u32(ts + 2) - 0.5) * 12.0).min(-(road_hw + 3.5))
+                    } else {
+                        (base_lat + (hash_u32(ts + 2) - 0.5) * 12.0).max(road_hw + 3.0)
+                    };
+                    let s = spline.sample(td);
+                    let ty = terrain_offset_y(biome, tlat, td, road_hw);
+                    let tree_model = if hash_u32(ts + 3) > 0.76 {
+                        ModelId::SmallPalm(((ts / 5) % 10) as u8)
+                    } else {
+                        pick_tree(ts)
+                    };
+                    let sc = 0.88 + hash_u32(ts + 4) * 0.48;
                     push_prop(
-                        ModelId::RanchHouse,
-                        s.pos + s.right * lat_r + Vec3::Y * (y_r - 0.50),
-                        yaw + if side < 0.0 { std::f32::consts::FRAC_PI_2 } else { -std::f32::consts::FRAC_PI_2 },
-                        Vec3::ONE,
+                        tree_model,
+                        s.pos + s.right * tlat + Vec3::Y * (ty - 0.25),
+                        hash_u32(ts + 5) * 6.28,
+                        Vec3::splat(sc),
                         [1.0; 4],
-                        0.85,
-                        0.85,
+                        0.78,
+                        0.0,
                         true,
                     );
                 }
-                d += 4.0;
-                idx += 1;
+
+                grove_d += 11.0 + h0 * 24.0;
+            }
+
+            // 4. Estancia Ranch Houses & Hero Vista Composition (matching the reference illustration!)
+            for (ranch_i, &r_dist_off) in [56.0_f32, 420.0, 860.0, 1280.0].iter().enumerate() {
+                let rd = (hero_d + r_dist_off).rem_euclid(total);
+                let rs = spline.sample(rd);
+                let ryaw = (-rs.tangent.x).atan2(-rs.tangent.z);
+                let side = if ranch_i % 2 == 0 { 1.0_f32 } else { -1.0_f32 };
+                let r_lat = side * (road_hw + 14.5);
+                let ry = terrain_offset_y(biome, r_lat, rd, road_hw);
+                let house_pos = rs.pos + rs.right * r_lat + Vec3::Y * (ry - 0.35);
+                push_prop(
+                    ModelId::RanchHouse,
+                    house_pos,
+                    ryaw + if side < 0.0 { std::f32::consts::FRAC_PI_2 } else { -std::f32::consts::FRAC_PI_2 },
+                    Vec3::splat(0.92),
+                    [1.0; 4],
+                    0.88,
+                    0.85,
+                    true,
+                );
+                // Uruguayan Flagpole & spreading Ombu shade tree next to the estancia ranch house
+                push_prop(
+                    ModelId::Flagpole,
+                    house_pos - rs.tangent * 5.5 + rs.right * (side * 3.2) + Vec3::Y * 0.20,
+                    ryaw,
+                    Vec3::splat(0.85),
+                    [1.0; 4],
+                    0.85,
+                    0.5,
+                    true,
+                );
+                push_prop(
+                    ModelId::TreeOmbu((ranch_i % 10) as u8),
+                    house_pos + rs.tangent * 8.5 - rs.right * (side * 1.5),
+                    ryaw + 0.8,
+                    Vec3::splat(1.05),
+                    [1.0; 4],
+                    0.82,
+                    0.0,
+                    true,
+                );
+                // Tall Eucalyptus grove sheltering the right side of the estancia
+                for e_i in 0..4_u32 {
+                    let ed = (rd - 14.0 + e_i as f32 * 6.5).rem_euclid(total);
+                    let es = spline.sample(ed);
+                    let elat = side * (road_hw + 16.5 + (e_i % 2) as f32 * 5.0);
+                    let ey = terrain_offset_y(biome, elat, ed, road_hw);
+                    push_prop(
+                        ModelId::TreeEucalyptus(((ranch_i as u32 * 3 + e_i) % 10) as u8),
+                        es.pos + es.right * elat + Vec3::Y * (ey - 0.20),
+                        (e_i as f32) * 1.7,
+                        Vec3::splat(1.05 + (e_i % 3) as f32 * 0.14),
+                        [1.0; 4],
+                        0.80,
+                        0.0,
+                        true,
+                    );
+                }
+            }
+
+            // Curated foreground flora & fauna at hero_start_dist_m so the opening vista matches the picture
+            for &(d_off, lat_off, model, sc, yaw_off) in &[
+                // Left foreground Ceibo red-flowering bushes & Pampas Cortadera white plumes
+                (8.2_f32, -(road_hw + 1.65), ModelId::CeiboBush(0), 0.86_f32, 0.4_f32),
+                (10.6, -(road_hw + 1.25), ModelId::PampasCortadera(1), 0.88, 1.1),
+                (13.2, -(road_hw + 2.40), ModelId::ChircaBush(2), 0.78, 2.0),
+                (19.5, -(road_hw + 1.50), ModelId::CeiboBush(3), 0.82, 0.9),
+                (21.8, -(road_hw + 1.20), ModelId::PampasCortadera(4), 0.86, 1.7),
+                (26.5, -(road_hw + 3.80), ModelId::CampoRockCluster(2), 0.85, 0.5),
+                (44.0, -(road_hw + 14.5), ModelId::CampoRockGranite(4), 1.05, 1.2),
+                (52.0, -(road_hw + 22.0), ModelId::CampoRockSlate(6), 1.15, 0.7),
+                // Right fence-side Butiá small palms & scrub (framing the Ranch House clearly without occluding it)
+                (15.5, road_hw + 2.35, ModelId::SmallPalm(0), 0.92, 0.3),
+                (18.2, road_hw + 1.45, ModelId::ChircaBush(5), 0.78, 2.2),
+                (23.5, road_hw + 4.80, ModelId::SmallPalm(3), 0.98, 1.4),
+                // Foreground Mulitas foraging on the open grassy verge
+                (6.2, -(road_hw + 0.65), ModelId::Mulita(0), 1.25, 0.5),
+                (11.4, road_hw + 0.88, ModelId::Mulita(1), 1.20, -1.1),
+                // Mid-ground grazing horses in the open left meadow & right eucalyptus paddock
+                (34.0, -(road_hw + 5.8), ModelId::Horse(0), 1.08, 1.3),
+                (37.5, -(road_hw + 3.6), ModelId::Horse(1), 1.08, 0.5),
+                (41.5, -(road_hw + 8.2), ModelId::Horse(2), 1.05, 2.1),
+                (25.0, road_hw + 7.5, ModelId::Horse(3), 1.08, -1.3),
+                (30.5, road_hw + 10.5, ModelId::Horse(0), 1.05, -0.7),
+                // Mid-distant cattle herd on the left rolling pasture hillside
+                (54.0, -(road_hw + 11.5), ModelId::Cow(0), 1.10, 1.1),
+                (58.0, -(road_hw + 15.0), ModelId::Cow(1), 1.10, 1.6),
+                (62.5, -(road_hw + 9.5), ModelId::Cow(2), 1.08, 0.4),
+                (66.0, -(road_hw + 17.5), ModelId::Cow(3), 1.10, 2.3),
+                // Flock of sheep on the grassy slope
+                (27.5, -(road_hw + 7.8), ModelId::Sheep(0), 1.10, 0.8),
+                (29.8, -(road_hw + 9.6), ModelId::Sheep(1), 1.08, 1.5),
+                (31.4, -(road_hw + 7.0), ModelId::Sheep(2), 1.10, 2.0),
+                (33.2, -(road_hw + 10.8), ModelId::Sheep(3), 1.05, 0.3),
+            ] {
+                let cd = (hero_d + d_off).rem_euclid(total);
+                let cs = spline.sample(cd);
+                let cyaw = (-cs.tangent.x).atan2(-cs.tangent.z) + yaw_off;
+                let cy = terrain_offset_y(biome, lat_off, cd, road_hw);
+                push_prop(
+                    model,
+                    cs.pos + cs.right * lat_off + Vec3::Y * (cy - 0.04),
+                    cyaw,
+                    Vec3::splat(sc),
+                    [1.0; 4],
+                    0.88,
+                    0.0,
+                    true,
+                );
+            }
+
+            // 5. Distributed herds of Horses, Cows, and Sheep flocks across the entire 1.6 km Campo loop
+            let mut herd_d = 95.0_f32;
+            let mut h_idx = 0_u32;
+            while herd_d < total - 40.0 {
+                let hs = h_idx.wrapping_mul(173).wrapping_add(19);
+                let r0 = hash_u32(hs);
+                let r1 = hash_u32(hs + 13);
+                let side = if h_idx % 2 == 0 { -1.0_f32 } else { 1.0_f32 };
+                let base_lat = side * (road_hw + 6.5 + r0 * 28.0);
+                let herd_kind = h_idx % 3;
+                let members = match herd_kind {
+                    0 => 3 + (h_idx % 3), // Horses
+                    1 => 4 + (h_idx % 4), // Cows
+                    _ => 5 + (h_idx % 5), // Sheep flock
+                };
+                for m_i in 0..members {
+                    let ms = hs + m_i * 29;
+                    let md = (herd_d + (hash_u32(ms + 1) - 0.5) * 11.0).rem_euclid(total);
+                    let mlat = base_lat + (hash_u32(ms + 2) - 0.5) * 8.5;
+                    let s = spline.sample(md);
+                    let my = terrain_offset_y(biome, mlat, md, road_hw);
+                    let v = ((m_i + h_idx) % 4) as u8;
+                    let animal_model = match herd_kind {
+                        0 => ModelId::Horse(v),
+                        1 => ModelId::Cow(v),
+                        _ => ModelId::Sheep(v),
+                    };
+                    let sc = 0.94 + hash_u32(ms + 3) * 0.18;
+                    push_prop(
+                        animal_model,
+                        s.pos + s.right * mlat + Vec3::Y * (my - 0.03),
+                        hash_u32(ms + 4) * 6.28,
+                        Vec3::splat(sc),
+                        [1.0; 4],
+                        0.85,
+                        0.0,
+                        true,
+                    );
+                }
+                herd_d += 52.0 + r1 * 45.0;
+                h_idx += 1;
             }
         }
     }
