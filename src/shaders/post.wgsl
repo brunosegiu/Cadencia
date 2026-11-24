@@ -132,12 +132,5 @@ fn fs_post(in: PostOut) -> @location(0) vec4<f32> {
     let ink_col = mix(near_ink, far_ink, smoothstep(55.0, 280.0, edge_depth));
 
     var final_col = mix(center_col, ink_col, ink_mask);
-
-    let grain = (hash_grain(in.uv * frame.screen_params.xy) - 0.5) * frame.outline_params.w;
-    final_col = clamp(final_col + vec3<f32>(grain), vec3<f32>(0.0), vec3<f32>(1.0));
-
-    if (frame.sky_horizon.w > 0.5) {
-        return vec4<f32>(srgb_to_linear(final_col), 1.0);
-    }
-    return vec4<f32>(final_col, 1.0);
+    return vec4<f32>(clamp(final_col, vec3<f32>(0.0), vec3<f32>(1.0)), ink_mask);
 }

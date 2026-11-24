@@ -24,6 +24,7 @@ pub struct GraphicsSettings {
     pub prop_draw_distance_m: f32,
     pub fov_offset_deg: f32,
     pub shadows_enabled: bool,
+    pub taa_enabled: bool,
 }
 
 impl Default for GraphicsSettings {
@@ -33,8 +34,30 @@ impl Default for GraphicsSettings {
             prop_draw_distance_m: 560.0,
             fov_offset_deg: 0.0,
             shadows_enabled: true,
+            taa_enabled: true,
         }
     }
+}
+
+fn halton_value(mut index: u32, base: u32) -> f32 {
+    let mut f = 1.0_f32;
+    let mut r = 0.0_f32;
+    let b = base as f32;
+    while index > 0 {
+        f /= b;
+        r += f * ((index % base) as f32);
+        index /= base;
+    }
+    r
+}
+
+/// 8-sample Halton(2, 3) sub-pixel camera jitter offset in pixels `[-0.38, +0.38]`.
+pub fn halton_2_3_jitter_px(frame_index: u32) -> [f32; 2] {
+    let idx = (frame_index % 8) + 1;
+    [
+        (halton_value(idx, 2) - 0.5) * 0.76,
+        (halton_value(idx, 3) - 0.5) * 0.76,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +119,17 @@ pub struct FrameUniforms {
     pub light_view_proj_c1: [[f32; 4]; 4],
     pub light_view_proj_c2: [[f32; 4]; 4],
     pub cascade_splits: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct TaaUniforms {
+    pub inv_view_proj: [[f32; 4]; 4],
+    pub prev_view_proj: [[f32; 4]; 4],
+    pub screen_params: [f32; 4],
+    pub jitter_params: [f32; 4],
+    pub taa_params: [f32; 4],
+    pub camera_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -197,7 +231,12 @@ struct GBufferTargets {
     normal_view: wgpu::TextureView,
     scene_depth_tex: wgpu::Texture,
     scene_depth_view: wgpu::TextureView,
+    post_color_tex: wgpu::Texture,
+    post_color_view: wgpu::TextureView,
+    taa_history_tex: [wgpu::Texture; 2],
+    taa_history_views: [wgpu::TextureView; 2],
     post_bind_group: wgpu::BindGroup,
+    taa_bind_groups: [wgpu::BindGroup; 2],
 }
 
 #[derive(Clone, Copy)]
@@ -259,10 +298,13 @@ pub struct LigneClaireRenderer {
     #[allow(dead_code)]
     shadow_sampler: wgpu::Sampler,
     gbuf_sampler: wgpu::Sampler,
+    taa_linear_sampler: wgpu::Sampler,
+    taa_buf: wgpu::Buffer,
 
     frame_bgl: wgpu::BindGroupLayout,
     scene_frame_bgl: wgpu::BindGroupLayout,
     post_bgl: wgpu::BindGroupLayout,
+    taa_bgl: wgpu::BindGroupLayout,
     obj_bgl: wgpu::BindGroupLayout,
 
     frame_bg: wgpu::BindGroup,
@@ -275,6 +317,15 @@ pub struct LigneClaireRenderer {
     scene_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
+    taa_pipeline: wgpu::RenderPipeline,
+
+    taa_frame_index: u32,
+    taa_history_valid: bool,
+    prev_unjittered_view_proj: Mat4,
+    prev_jitter_uv: [f32; 2],
+    prev_cam_pos: Vec3,
+    last_camera_mode: Option<CameraMode>,
+    last_biome: Option<BiomeId>,
 
     gbuf: GBufferTargets,
     pub egui_renderer: egui_wgpu::Renderer,
@@ -622,6 +673,20 @@ impl LigneClaireRenderer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let taa_linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("taa_linear_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let taa_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("taa_uniforms"),
+            size: std::mem::size_of::<TaaUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let frame_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame_bgl"),
@@ -726,6 +791,70 @@ impl LigneClaireRenderer {
             ],
         });
 
+        let taa_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("taa_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<TaaUniforms>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         let obj_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("obj_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -799,6 +928,10 @@ impl LigneClaireRenderer {
         let post_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post.wgsl").into()),
+        });
+        let taa_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("taa_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
         });
 
         let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -979,7 +1112,7 @@ impl LigneClaireRenderer {
                 entry_point: Some("fs_post"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -988,7 +1121,55 @@ impl LigneClaireRenderer {
             cache: None,
         });
 
-        let gbuf = Self::create_gbuffer(device, width, height, &post_bgl, &frame_buf, &gbuf_sampler);
+        let taa_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("taa_pl"),
+            bind_group_layouts: &[Some(&taa_bgl)],
+            immediate_size: 0,
+        });
+        let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("taa_pipeline"),
+            layout: Some(&taa_pl),
+            vertex: wgpu::VertexState {
+                module: &taa_mod,
+                entry_point: Some("vs_taa"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &taa_mod,
+                entry_point: Some("fs_taa"),
+                compilation_options: Default::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: output_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let gbuf = Self::create_gbuffer(
+            device,
+            width,
+            height,
+            &post_bgl,
+            &taa_bgl,
+            &frame_buf,
+            &taa_buf,
+            &gbuf_sampler,
+            &taa_linear_sampler,
+        );
         let egui_renderer = egui_wgpu::Renderer::new(
             device,
             output_format,
@@ -1034,9 +1215,12 @@ impl LigneClaireRenderer {
             shadow_cascade_views,
             shadow_sampler,
             gbuf_sampler,
+            taa_linear_sampler,
+            taa_buf,
             frame_bgl,
             scene_frame_bgl,
             post_bgl,
+            taa_bgl,
             obj_bgl,
             frame_bg,
             shadow_frame_bgs,
@@ -1047,6 +1231,14 @@ impl LigneClaireRenderer {
             scene_pipeline,
             water_pipeline,
             post_pipeline,
+            taa_pipeline,
+            taa_frame_index: 0,
+            taa_history_valid: false,
+            prev_unjittered_view_proj: Mat4::IDENTITY,
+            prev_jitter_uv: [0.0; 2],
+            prev_cam_pos: Vec3::ZERO,
+            last_camera_mode: None,
+            last_biome: None,
             gbuf,
             egui_renderer,
         }
@@ -1099,13 +1291,17 @@ impl LigneClaireRenderer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_gbuffer(
         device: &wgpu::Device,
         width: u32,
         height: u32,
         post_bgl: &wgpu::BindGroupLayout,
+        taa_bgl: &wgpu::BindGroupLayout,
         frame_buf: &wgpu::Buffer,
+        taa_buf: &wgpu::Buffer,
         gbuf_sampler: &wgpu::Sampler,
+        taa_linear_sampler: &wgpu::Sampler,
     ) -> GBufferTargets {
         let mk_tex = |label: &str, fmt: wgpu::TextureFormat| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -1126,10 +1322,20 @@ impl LigneClaireRenderer {
         let lit_tex = mk_tex("gbuf_lit", wgpu::TextureFormat::Rgba8Unorm);
         let normal_tex = mk_tex("gbuf_norm", wgpu::TextureFormat::Rgba8Unorm);
         let scene_depth_tex = mk_tex("gbuf_z", wgpu::TextureFormat::Depth32Float);
+        let post_color_tex = mk_tex("post_color", wgpu::TextureFormat::Rgba8Unorm);
+        let taa_history_tex = [
+            mk_tex("taa_history_0", wgpu::TextureFormat::Rgba8Unorm),
+            mk_tex("taa_history_1", wgpu::TextureFormat::Rgba8Unorm),
+        ];
 
         let lit_view = lit_tex.create_view(&Default::default());
         let normal_view = normal_tex.create_view(&Default::default());
         let scene_depth_view = scene_depth_tex.create_view(&Default::default());
+        let post_color_view = post_color_tex.create_view(&Default::default());
+        let taa_history_views = [
+            taa_history_tex[0].create_view(&Default::default()),
+            taa_history_tex[1].create_view(&Default::default()),
+        ];
 
         let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("post_bg"),
@@ -1158,6 +1364,41 @@ impl LigneClaireRenderer {
             ],
         });
 
+        // Ping-pong TAA bind groups: pass i reads taa_history_views[1 - i] and renders into taa_history_views[i]
+        let taa_bind_groups = std::array::from_fn(|curr_idx| {
+            let prev_idx = 1 - curr_idx;
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("taa_bg_{curr_idx}")),
+                layout: taa_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: taa_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&post_color_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&taa_history_views[prev_idx]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&scene_depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&normal_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(taa_linear_sampler),
+                    },
+                ],
+            })
+        });
+
         GBufferTargets {
             width,
             height,
@@ -1167,7 +1408,12 @@ impl LigneClaireRenderer {
             normal_view,
             scene_depth_tex,
             scene_depth_view,
+            post_color_tex,
+            post_color_view,
+            taa_history_tex,
+            taa_history_views,
             post_bind_group,
+            taa_bind_groups,
         }
     }
 
@@ -1180,9 +1426,13 @@ impl LigneClaireRenderer {
                 w,
                 h,
                 &self.post_bgl,
+                &self.taa_bgl,
                 &self.frame_buf,
+                &self.taa_buf,
                 &self.gbuf_sampler,
+                &self.taa_linear_sampler,
             );
+            self.taa_history_valid = false;
         }
     }
 
@@ -1435,6 +1685,7 @@ impl LigneClaireRenderer {
         self.static_draw_descs = static_draw_descs;
         self.static_sector_cmds = static_sector_cmds;
         self.static_descs_dirty = true;
+        self.taa_history_valid = false;
         self.skin_bg = Self::make_skin_bg(
             device,
             &self.skin_bgl,
@@ -1588,9 +1839,61 @@ impl LigneClaireRenderer {
         let near = 0.25_f32;
         let far = 1900.0_f32;
         let view_mat = Mat4::look_at_rh(cam_pos, cam_target, Vec3::Y);
-        let proj_mat = Mat4::perspective_rh(fov_deg.to_radians(), aspect, near, far);
+        let unjittered_proj_mat = Mat4::perspective_rh(fov_deg.to_radians(), aspect, near, far);
+        let unjittered_view_proj = unjittered_proj_mat * view_mat;
+        let unjittered_inv_view_proj = unjittered_view_proj.inverse();
+
+        // Halton(2, 3) 8-phase sub-pixel camera projection jitter for Temporal Anti-Aliasing (TAA)
+        let (proj_mat, curr_jitter_uv) = if graphics.taa_enabled {
+            let j_px = halton_2_3_jitter_px(self.taa_frame_index);
+            let w_f = target_width.max(1) as f32;
+            let h_f = target_height.max(1) as f32;
+            let j_ndc_x = (j_px[0] * 2.0) / w_f;
+            let j_ndc_y = (j_px[1] * 2.0) / h_f;
+            let jitter_mat = Mat4::from_translation(Vec3::new(j_ndc_x, j_ndc_y, 0.0));
+            (
+                jitter_mat * unjittered_proj_mat,
+                [j_px[0] / w_f, -j_px[1] / h_f],
+            )
+        } else {
+            (unjittered_proj_mat, [0.0, 0.0])
+        };
         let view_proj = proj_mat * view_mat;
-        let inv_view_proj = view_proj.inverse();
+        let inv_view_proj = unjittered_inv_view_proj;
+
+        let camera_cut = !self.taa_history_valid
+            || self.last_camera_mode != Some(camera_mode)
+            || self.last_biome != Some(biome)
+            || cam_pos.distance(self.prev_cam_pos) > 15.0;
+        let prev_vp_for_taa = if camera_cut {
+            unjittered_view_proj
+        } else {
+            self.prev_unjittered_view_proj
+        };
+        let taa_u = TaaUniforms {
+            inv_view_proj: unjittered_inv_view_proj.to_cols_array_2d(),
+            prev_view_proj: prev_vp_for_taa.to_cols_array_2d(),
+            screen_params: [
+                target_width as f32,
+                target_height as f32,
+                1.0 / target_width.max(1) as f32,
+                1.0 / target_height.max(1) as f32,
+            ],
+            jitter_params: [
+                curr_jitter_uv[0],
+                curr_jitter_uv[1],
+                self.prev_jitter_uv[0],
+                self.prev_jitter_uv[1],
+            ],
+            taa_params: [
+                if graphics.taa_enabled { 1.0 } else { 0.0 },
+                if camera_cut { 1.0 } else { 0.0 },
+                if self.output_format.is_srgb() { 1.0 } else { 0.0 },
+                0.003,
+            ],
+            camera_params: [near, far, 0.11, 0.22],
+        };
+        queue.write_buffer(&self.taa_buf, 0, bytemuck::bytes_of(&taa_u));
 
         // 3-Cascade Directional Shadow Map (CSM) with texel snapping & per-cascade caster size filtering
         let sun_dir = geo.hero_sun_dir;
@@ -1701,7 +2004,7 @@ impl LigneClaireRenderer {
         // CPU OCTREE FRUSTUM TRAVERSAL & SECTOR ENQUEUEING TO GPU
         // -----------------------------------------------------------------
         let max_prop_dist = graphics.prop_draw_distance_m.clamp(150.0, 1200.0);
-        let cam_frustum = Frustum::from_view_proj(view_proj);
+        let cam_frustum = Frustum::from_view_proj(unjittered_view_proj);
         let csm_frustums: [Frustum; NUM_SHADOW_CASCADES] =
             std::array::from_fn(|ci| Frustum::from_view_proj(cascade_vp[ci]));
 
@@ -2152,13 +2455,13 @@ impl LigneClaireRenderer {
         }
 
         // -----------------------------------------------------------------
-        // Pass 5: Fullscreen Ligne Claire Ink Outline Post-Process -> Target Surface
+        // Pass 5: Fullscreen Ligne Claire Ink Outline Post-Process -> Offscreen Post Color Buffer
         // -----------------------------------------------------------------
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("post_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_view,
+                    view: &self.gbuf.post_color_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -2175,6 +2478,51 @@ impl LigneClaireRenderer {
             rpass.set_bind_group(0, &self.gbuf.post_bind_group, &[]);
             rpass.draw(0..3, 0..1);
         }
+
+        // -----------------------------------------------------------------
+        // Pass 5b: Temporal Anti-Aliasing (TAA) Resolve & CAS Sharpening -> Target Surface + TAA History
+        // -----------------------------------------------------------------
+        let curr_taa_idx = (self.taa_frame_index as usize) & 1;
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("taa_pass"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.gbuf.taa_history_views[curr_taa_idx],
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            rpass.set_pipeline(&self.taa_pipeline);
+            rpass.set_bind_group(0, &self.gbuf.taa_bind_groups[curr_taa_idx], &[]);
+            rpass.draw(0..3, 0..1);
+        }
+
+        self.prev_unjittered_view_proj = unjittered_view_proj;
+        self.prev_jitter_uv = curr_jitter_uv;
+        self.prev_cam_pos = cam_pos;
+        self.last_camera_mode = Some(camera_mode);
+        self.last_biome = Some(biome);
+        self.taa_history_valid = true;
+        self.taa_frame_index = self.taa_frame_index.wrapping_add(1);
 
         // -----------------------------------------------------------------
         // Pass 6: Stylized egui HUD Overlay
@@ -2218,6 +2566,8 @@ impl LigneClaireRenderer {
             &self.gbuf.lit_tex,
             &self.gbuf.normal_tex,
             &self.gbuf.scene_depth_tex,
+            &self.gbuf.post_color_tex,
+            &self.gbuf.taa_history_tex,
             &self.frame_bgl,
             &self.scene_frame_bgl,
             &self.cull_bgl,

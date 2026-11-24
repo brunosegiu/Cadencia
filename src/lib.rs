@@ -709,8 +709,8 @@ pub fn render_headless_screenshot_screen(
 
     let egui_ctx = egui::Context::default();
     let pixels_per_point = (width as f32 / 1280.0).clamp(0.75, 2.0);
-    // Warm up 2 frames so egui fonts, textures, and layout settle cleanly
-    for frame_i in 0..2 {
+    // Warm up 8 frames so the 8-sample Halton(2, 3) TAA history and egui layout settle cleanly
+    for frame_i in 0..8 {
         sim.last_telemetry = sim.sim_hw.poll_telemetry();
         let raw_input = egui::RawInput {
             time: Some(frame_i as f64 * 0.5),

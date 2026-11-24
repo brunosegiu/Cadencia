@@ -1655,7 +1655,9 @@ fn draw_settings_screen(
                 cols[0].add(egui::Slider::new(&mut graphics.fov_offset_deg, -10.0..=10.0).text("Degrees"));
                 cols[0].add_space(10.0);
                 cols[0].checkbox(&mut graphics.shadows_enabled, "Enable Directional Sun Shadows (2048x2048)");
-                cols[0].add_space(16.0);
+                cols[0].add_space(6.0);
+                cols[0].checkbox(&mut graphics.taa_enabled, "Enable Temporal Anti-Aliasing (TAA)");
+                cols[0].add_space(14.0);
                 if cols[0].button("Reset Graphics Defaults").clicked() {
                     *graphics = GraphicsSettings::default();
                 }

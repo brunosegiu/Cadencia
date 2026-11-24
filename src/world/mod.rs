@@ -411,5 +411,16 @@ mod tests {
             geo.octree.query_frustum(&frustum, &mut vis);
             assert!(!vis.is_empty() && vis.len() < geo.sectors.len());
         }
+
+        // Verify 8-phase Halton(2, 3) TAA sub-pixel jitter distribution
+        let mut sum_x = 0.0_f32;
+        let mut sum_y = 0.0_f32;
+        for i in 0..8 {
+            let j = crate::renderer::halton_2_3_jitter_px(i);
+            assert!(j[0].abs() <= 0.5 && j[1].abs() <= 0.5);
+            sum_x += j[0];
+            sum_y += j[1];
+        }
+        assert!((sum_x / 8.0).abs() < 0.1 && (sum_y / 8.0).abs() < 0.1);
     }
 }
