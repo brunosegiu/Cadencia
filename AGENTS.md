@@ -14,6 +14,7 @@ All AI coding agents and contributors must follow these rules whenever modifying
      - `cargo build --offline`
      - `cargo run --offline -- ...`
      - `cargo check --offline --target wasm32-unknown-unknown --no-default-features`
+     - `powershell -ExecutionPolicy Bypass -File .\build_android_apk.ps1` (builds `aarch64-linux-android` release `libcadence_lib.so` and packages/signs `cadence.apk`)
 2. **Keep Library and Binary Target Names Distinct (`Cargo.toml`):**
    - In `Cargo.toml`, `[lib]` must remain `name = "cadence_lib"` (`crate-type = ["cdylib", "rlib"]`) and `[[bin]]` must remain `name = "cadence"`. Never give `[lib]` and `[[bin]]` the same name, as Windows MSVC builds will emit `cadence.pdb` output filename collision warnings.
 3. **Mandatory 4-Step Verification Before Every Commit:**

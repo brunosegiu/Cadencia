@@ -492,6 +492,13 @@ impl ApplicationHandler for CadenceApp {
         }
     }
 
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        {
+            self.state = None;
+        }
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(st) = self.state.as_mut() else {
             return;
@@ -506,7 +513,7 @@ impl ApplicationHandler for CadenceApp {
             WindowEvent::KeyboardInput { event: kev, .. } if kev.state == ElementState::Pressed => {
                 if let PhysicalKey::Code(code) = kev.physical_key {
                     match code {
-                        KeyCode::Escape => match st.sim.screen {
+                        KeyCode::Escape | KeyCode::BrowserBack => match st.sim.screen {
                             AppScreen::WorldSelect
                             | AppScreen::Settings
                             | AppScreen::AvatarEditor => {

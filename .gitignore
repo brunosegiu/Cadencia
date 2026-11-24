@@ -1,4 +1,6 @@
 /target
 **/*.blend1
 *.tmp
+*.apk
+*.idsig
 screenshots/capture.png
