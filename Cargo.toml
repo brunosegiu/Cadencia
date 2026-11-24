@@ -5,6 +5,7 @@ edition = "2021"
 description = "Cross-platform Ligne Claire stylized indoor cycling training app (Rust + WebGPU/wgpu + WASM)"
 
 [lib]
+name = "cadence_lib"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
