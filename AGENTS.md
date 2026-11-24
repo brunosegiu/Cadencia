@@ -45,7 +45,7 @@ All AI coding agents and contributors must follow these rules whenever modifying
 
 | Path | Responsibility |
 | :--- | :--- |
-| `src/main.rs` | Desktop CLI entry point supporting `--level <mountain\|coastal\|rural>`, `--screenshot <path>`, `--biome <name>`, `--screen <main_menu\|world_select\|settings\|gear\|ingame>`, `--camera <mode>`, `--width <px>`, `--height <px>`. |
+| `src/main.rs` | Desktop CLI entry point supporting `--level <cerro\|rambla\|campo>`, `--screenshot <path>`, `--biome <name>`, `--screen <main_menu\|world_select\|settings\|gear\|ingame>`, `--camera <mode>`, `--width <px>`, `--height <px>`. |
 | `src/lib.rs` | Application state loop (`CadenceSim`, `WindowGpuState`), desktop `run_windowed`, WASM `run_web`, Android `android_main`, and 8-frame TAA-converged `render_headless_screenshot_screen`. |
 | `src/assets.rs` | Compressed 24-byte `SceneVertex` format, `SceneVertex::new_packed_prop` per-vertex metadata packing, and `AssetBank` (procedural + embedded glTF models). |
 | `src/world/mod.rs` | `BiomeId` (`MountainClimb`, `CoastalPromenade`, `RollingRuralGravel`), closed-loop 3D Catmull-Rom `RouteSpline`, and world unit tests. |
@@ -116,10 +116,10 @@ Every 3D mesh vertex is strictly **24 bytes** (`#[repr(C)]`):
 
 1. **Screen Navigation Flow (`src/ui/mod.rs`):**
    - **Main Menu (`AppScreen::MainMenu`):** Features a random 3D world background (`BiomeId::random()`), the player avatar stationary on the right (`RiderPoseMode::MenuStopped`, right foot resting on the ground), and `RIDE`, `SETTINGS`, and `GEAR` buttons on the left.
-   - **World Select (`AppScreen::WorldSelect`):** Opened by pressing `RIDE`; displays the 3 worlds (`MountainClimb`, `CoastalPromenade`, `RollingRuralGravel`) with elevation profile sparklines. Clicking a card launches that world. Players cannot switch worlds on the fly in-game.
+   - **World Select (`AppScreen::WorldSelect`):** Opened by pressing `RIDE`; displays the 3 worlds (**Cerro** / `MountainClimb`, **Rambla** / `CoastalPromenade`, **Campo** / `RollingRuralGravel`) with elevation profile sparklines. Clicking a card launches that world. Players cannot switch worlds on the fly in-game.
    - **Settings (`AppScreen::Settings`):** Two-column Game & Graphics settings screen (outline weight, draw distance, FOV offset, directional shadows toggle, TAA toggle, and BLE/Simulator trainer controls).
    - **Gear / Avatar Editor (`AppScreen::AvatarEditor`):** Intentionally blank screen with a top-left `BACK` pill returning to the Main Menu.
-   - **Direct Level Debugging CLI:** `--level <mountain|coastal|rural>` bypasses the Main Menu and launches directly into `AppScreen::InGame`.
+   - **Direct Level Debugging CLI:** `--level <cerro|rambla|campo>` bypasses the Main Menu and launches directly into `AppScreen::InGame`.
 2. **In-Game HUD Invariants (`draw_hud` in `src/ui/mod.rs`):**
    - **Top-Left Power Card:** Displays only Wattage (`W`), 6-zone power bar, `W/KG`, `AVG` watts, and `RPM` cadence (no circular leaf dial next to the card, no heart rate `BPM`, and no `GEAR` footer).
    - **Top-Center Route Card:** Ride timer (`elapsed_time_s`) starts at `0:00:00` upon entering a map; no fake XP/drops counter.

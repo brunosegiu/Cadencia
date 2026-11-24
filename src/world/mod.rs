@@ -19,9 +19,9 @@ impl BiomeId {
 
     pub fn name(self) -> &'static str {
         match self {
-            BiomeId::MountainClimb => "Mountain Climb",
-            BiomeId::CoastalPromenade => "Coastal Promenade",
-            BiomeId::RollingRuralGravel => "Rolling Rural Gravel",
+            BiomeId::MountainClimb => "Cerro",
+            BiomeId::CoastalPromenade => "Rambla",
+            BiomeId::RollingRuralGravel => "Campo",
         }
     }
 
@@ -68,9 +68,13 @@ impl BiomeId {
 
     pub fn from_str_arg(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "mountain" | "mountain_climb" | "mountainclimb" | "1" => Some(BiomeId::MountainClimb),
-            "coastal" | "coastal_promenade" | "coastalpromenade" | "2" => Some(BiomeId::CoastalPromenade),
-            "rural" | "rolling_rural_gravel" | "rollingruralgravel" | "gravel" | "3" => {
+            "cerro" | "mountain" | "mountain_climb" | "mountainclimb" | "1" => {
+                Some(BiomeId::MountainClimb)
+            }
+            "rambla" | "coastal" | "coastal_promenade" | "coastalpromenade" | "2" => {
+                Some(BiomeId::CoastalPromenade)
+            }
+            "campo" | "rural" | "rolling_rural_gravel" | "rollingruralgravel" | "gravel" | "3" => {
                 Some(BiomeId::RollingRuralGravel)
             }
             _ => None,
@@ -381,6 +385,12 @@ mod tests {
     #[test]
     fn level_name_parsing_and_random_biome_are_valid() {
         assert_eq!(std::mem::size_of::<crate::assets::SceneVertex>(), 24);
+        assert_eq!(BiomeId::MountainClimb.name(), "Cerro");
+        assert_eq!(BiomeId::CoastalPromenade.name(), "Rambla");
+        assert_eq!(BiomeId::RollingRuralGravel.name(), "Campo");
+        assert_eq!(BiomeId::from_str_arg("cerro"), Some(BiomeId::MountainClimb));
+        assert_eq!(BiomeId::from_str_arg("rambla"), Some(BiomeId::CoastalPromenade));
+        assert_eq!(BiomeId::from_str_arg("campo"), Some(BiomeId::RollingRuralGravel));
         assert_eq!(BiomeId::from_str_arg("mountain"), Some(BiomeId::MountainClimb));
         assert_eq!(BiomeId::from_str_arg("coastal"), Some(BiomeId::CoastalPromenade));
         assert_eq!(BiomeId::from_str_arg("rural"), Some(BiomeId::RollingRuralGravel));

@@ -33,7 +33,7 @@ fn main() {
                         }
                         None => {
                             eprintln!(
-                                "Unknown level '{}'. Valid levels: mountain, coastal, rural",
+                                "Unknown level '{}'. Valid levels: cerro, rambla, campo",
                                 args[i + 1]
                             );
                             std::process::exit(1);
