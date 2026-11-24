@@ -13,6 +13,7 @@ $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER = "$ndkBin\aarch64-linux-android2
 $env:CC_aarch64_linux_android = "$ndkBin\aarch64-linux-android26-clang.cmd"
 $env:CXX_aarch64_linux_android = "$ndkBin\aarch64-linux-android26-clang++.cmd"
 $env:AR_aarch64_linux_android = "$ndkBin\llvm-ar.exe"
+$env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = "-C link-arg=-Wl,-z,max-page-size=16384"
 
 Write-Host "==> 1. Compiling Rust aarch64-linux-android shared library (libcadence_lib.so)..."
 cargo build --offline --release --lib --target aarch64-linux-android --no-default-features
@@ -54,7 +55,7 @@ try {
 Write-Host "==> 4. Aligning APK with zipalign..."
 & "$buildTools\zipalign.exe" -f -p 4 "$apkBuildDir\unaligned.apk" "$apkBuildDir\aligned.apk"
 
-$keystore = "$apkBuildDir\debug.keystore"
+$keystore = "target\debug.keystore"
 if (-not (Test-Path $keystore)) {
     Write-Host "==> 5. Generating debug keystore..."
     & "$jdkHome\bin\keytool.exe" -genkeypair `

@@ -807,7 +807,7 @@ pub fn draw_hud(
     // 6. BOTTOM-CENTER ACTION BAR (custom vector icons, zero missing Unicode glyphs!)
     egui::Area::new(egui::Id::unique("hud_bottom_bar"))
         .fade_in(false)
-        .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -10.0))
+        .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -22.0))
         .show(ctx, |ui| {
             egui::Frame::NONE
                 .fill(Color32::from_rgba_unmultiplied(64, 48, 36, 228))
@@ -818,7 +818,7 @@ pub fn draw_hud(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 18.0;
                         let draw_action = |ui: &mut Ui, kind: u8, label: &str| -> bool {
-                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(124.0, 20.0), Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(Vec2::new(126.0, 24.0), Sense::click());
                             let p = ui.painter();
                             let ic = Pos2::new(rect.min.x + 9.0, rect.center().y);
                             let col = if resp.hovered() { Color32::WHITE } else { Color32::from_rgb(235, 228, 218) };
@@ -850,7 +850,7 @@ pub fn draw_hud(
                                 FontId::new(12.2, FontFamily::Proportional),
                                 col,
                             );
-                            resp.clicked()
+                            was_tapped(ui, &resp)
                         };
                         if draw_action(ui, 0, "Take Screenshot") {
                             actions.request_screenshot = true;
@@ -1179,6 +1179,25 @@ fn draw_jersey_gear_icon(p: &egui::Painter, center: Pos2, scale: f32) {
     p.circle_filled(center + Vec2::new(0.0, -5.0 * scale), 2.3 * scale, ink);
 }
 
+fn was_tapped(ui: &Ui, resp: &egui::Response) -> bool {
+    if resp.clicked() {
+        return true;
+    }
+    let released_pos = ui.input(|i| {
+        if i.pointer.any_released() {
+            i.pointer.latest_pos().or_else(|| i.pointer.interact_pos())
+        } else {
+            None
+        }
+    });
+    if let Some(pos) = released_pos {
+        if resp.rect.contains(pos) {
+            return true;
+        }
+    }
+    false
+}
+
 fn draw_main_menu(ctx: &egui::Context) -> HudActions {
     let mut actions = HudActions::default();
     let screen = ctx.input(|i| i.content_rect());
@@ -1274,13 +1293,13 @@ fn draw_main_menu(ctx: &egui::Context) -> HudActions {
                 2.0 * scale,
             );
 
-            if ride_resp.clicked() {
+            if was_tapped(ui, &ride_resp) {
                 actions.navigate_to = Some(AppScreen::WorldSelect);
             }
-            if settings_resp.clicked() {
+            if was_tapped(ui, &settings_resp) {
                 actions.navigate_to = Some(AppScreen::Settings);
             }
-            if gear_resp.clicked() {
+            if was_tapped(ui, &gear_resp) {
                 actions.navigate_to = Some(AppScreen::AvatarEditor);
             }
         });
@@ -1303,7 +1322,7 @@ fn draw_back_pill(ui: &mut Ui, pos: Pos2, scale: f32) -> bool {
         Color32::from_rgb(22, 20, 16),
         1.8 * scale,
     );
-    resp.clicked()
+    was_tapped(ui, &resp)
 }
 
 fn draw_world_preview_banner(p: &egui::Painter, rect: Rect, biome: BiomeId) {
@@ -1582,7 +1601,7 @@ fn draw_world_select(ctx: &egui::Context) -> HudActions {
                     1.6 * scale,
                 );
 
-                if resp.clicked() {
+                if was_tapped(ui, &resp) {
                     actions.launch_biome = Some(biome);
                 }
             }

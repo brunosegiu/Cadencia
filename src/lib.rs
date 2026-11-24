@@ -233,6 +233,14 @@ struct WindowGpuState {
 }
 
 impl WindowGpuState {
+    fn update_ui_zoom(egui_ctx: &egui::Context, window: &Window, width: u32, height: u32) {
+        let native_ppp = (window.scale_factor() as f32).max(0.5);
+        let short_edge = width.min(height).max(1) as f32;
+        // Keep at least 720 logical points on the short edge so the 1280x960 UI fits high-DPI mobile screens cleanly
+        let target_ppp = (short_edge / 720.0).clamp(1.0, native_ppp);
+        egui_ctx.set_zoom_factor((target_ppp / native_ppp).clamp(0.25, 2.0));
+    }
+
     async fn init(window: Arc<Window>, initial_level: Option<BiomeId>) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -273,6 +281,7 @@ impl WindowGpuState {
         renderer.upload_world(&device, &sim.world_geo);
 
         let egui_ctx = egui::Context::default();
+        Self::update_ui_zoom(&egui_ctx, &window, width, height);
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -303,6 +312,7 @@ impl WindowGpuState {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.renderer.resize(&self.device, width, height);
+            Self::update_ui_zoom(&self.egui_ctx, &self.window, width, height);
         }
     }
 
@@ -503,7 +513,26 @@ impl ApplicationHandler for CadenceApp {
         let Some(st) = self.state.as_mut() else {
             return;
         };
+        if let WindowEvent::Resized(sz) = event {
+            st.resize(sz.width, sz.height);
+        }
+        let touch_phase = match &event {
+            WindowEvent::Touch(t) => Some(t.phase),
+            _ => None,
+        };
         let resp = st.egui_winit.on_window_event(&st.window, &event);
+        if matches!(
+            touch_phase,
+            Some(winit::event::TouchPhase::Started | winit::event::TouchPhase::Ended)
+        ) {
+            // Render immediately on touch start and touch end so fast taps are never collapsed into a single egui pass
+            st.render_and_present();
+            st.window.request_redraw();
+            return;
+        }
+        if resp.repaint {
+            st.window.request_redraw();
+        }
         if resp.consumed {
             return;
         }

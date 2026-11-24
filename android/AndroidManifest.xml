@@ -22,6 +22,8 @@
             android:name="android.app.NativeActivity"
             android:label="Cadence"
             android:screenOrientation="sensorLandscape"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:exported="true">
 
