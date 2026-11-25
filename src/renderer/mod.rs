@@ -5,7 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::assets::{AssetBank, MaterialRole, ModelId, SceneVertex};
+use crate::assets::{f32_to_f16, AssetBank, MaterialRole, ModelId, SceneVertex};
 use crate::world::riders::{
     build_animal_draw_parts, build_rider_draw_parts, AiRider, DynamicAnimal, RiderPartDraw,
     RiderPoseMode, RiderProfile,
@@ -1574,6 +1574,15 @@ impl LigneClaireRenderer {
                             | ModelId::RanchHouse
                     );
                     let normal_mat = glam::Mat3::from_mat4(p.transform).inverse().transpose();
+                    let base_pos = p.transform.w_axis.truncate();
+                    // Unique non-periodic per-instance seed in [0.5, 250.0] derived from prop index & world coordinates
+                    let raw_seed = ((pi as u32).wrapping_mul(747796405).wrapping_add(2891336453))
+                        ^ (base_pos.x.to_bits().wrapping_mul(1597334677))
+                        ^ (base_pos.z.to_bits().wrapping_mul(3812015801));
+                    let inst_seed_f32 =
+                        0.5 + ((raw_seed & 0x00FF_FFFF) as f32 / 16_777_215.0) * 249.5;
+                    let inst_seed_f16 = f32_to_f16(inst_seed_f32);
+                    let scale_factor = max_scale.sqrt().clamp(0.65, 1.65);
 
                     for ms in &gpu_model.sections {
                         let local_v_base = tier_verts[tier_idx].len() as u32;
@@ -1595,10 +1604,68 @@ impl LigneClaireRenderer {
                                 ((sv.color[1] as f32) * p.tint[1]).clamp(0.0, 255.0).round() as u8,
                                 ((sv.color[2] as f32) * p.tint[2]).clamp(0.0, 255.0).round() as u8,
                             ];
+
+                            let local_y = sv.pos[1].max(0.0);
+                            let r_xz = (sv.pos[0] * sv.pos[0] + sv.pos[2] * sv.pos[2]).sqrt();
+                            let sway_flex = match p.model {
+                                ModelId::TreeCanopy
+                                | ModelId::TreePine
+                                | ModelId::TreeEucalyptus(_)
+                                | ModelId::TreeOmbu(_)
+                                | ModelId::TreeCeibo(_) => {
+                                    let h_norm = ((local_y - 0.35).max(0.0) / 5.2).clamp(0.0, 1.35);
+                                    let leaf_boost = if mat_type == 2 {
+                                        1.0 + 0.38 * (r_xz / 2.2).clamp(0.0, 1.0)
+                                    } else {
+                                        0.52
+                                    };
+                                    0.078 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
+                                }
+                                ModelId::PalmTree | ModelId::SmallPalm(_) => {
+                                    let h_norm = ((local_y - 0.15).max(0.0) / 2.5).clamp(0.0, 1.4);
+                                    let frond_out = (r_xz / 1.35).clamp(0.0, 1.3);
+                                    0.060
+                                        * (h_norm * 0.52 + frond_out * h_norm * 0.78)
+                                        * scale_factor
+                                }
+                                ModelId::PampasCortadera(_) => {
+                                    let h_norm = (local_y / 1.75).clamp(0.0, 1.3);
+                                    let blade_out = (r_xz / 0.85).clamp(0.0, 1.25);
+                                    0.064
+                                        * (h_norm * h_norm
+                                            + blade_out * (local_y / 0.55).clamp(0.0, 1.0) * 0.58)
+                                        * scale_factor
+                                }
+                                ModelId::ChircaBush(_)
+                                | ModelId::CeiboBush(_)
+                                | ModelId::BushCluster => {
+                                    let h_norm = ((local_y - 0.04).max(0.0) / 1.30).clamp(0.0, 1.25);
+                                    let out_norm = (r_xz / 0.85).clamp(0.0, 1.25);
+                                    0.046 * (h_norm * (0.65 + 0.45 * out_norm)) * scale_factor
+                                }
+                                ModelId::WildflowerTuft => {
+                                    let h_norm = (local_y / 0.36).clamp(0.0, 1.25);
+                                    0.030 * (h_norm * h_norm) * scale_factor
+                                }
+                                ModelId::Flagpole => {
+                                    if r_xz > 0.11 && local_y > 2.5 {
+                                        0.045 * ((r_xz - 0.10) / 1.1).clamp(0.0, 1.2) * scale_factor
+                                    } else {
+                                        0.0
+                                    }
+                                }
+                                _ => 0.0,
+                            };
+                            let packed_uv = if sway_flex > 0.0001 {
+                                [f32_to_f16(sway_flex), inst_seed_f16]
+                            } else {
+                                [0u16, 0u16]
+                            };
+
                             let packed_v = SceneVertex::new_packed_prop(
                                 wp.to_array(),
                                 wn.to_array(),
-                                sv.uv,
+                                packed_uv,
                                 rgb,
                                 mat_type,
                                 p.object_id,

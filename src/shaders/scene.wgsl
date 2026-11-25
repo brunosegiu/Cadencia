@@ -80,10 +80,54 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
+fn apply_vegetation_sway(world_pos: vec3<f32>, sway_uv: vec2<f32>, time_s: f32) -> vec3<f32> {
+    let flex = sway_uv.x;
+    if (flex <= 0.0001) {
+        return world_pos;
+    }
+    let seed = sway_uv.y;
+    // Per-instance randomized parameters from seed (incommensurate frequencies prevent periodicity)
+    let h1 = fract(sin(seed * 12.9898) * 43758.5453);
+    let h2 = fract(sin(seed * 78.2330) * 28461.7193);
+    let h3 = fract(sin(seed * 41.6351) * 61539.1847);
+
+    let freq1 = 1.15 + h1 * 0.95;
+    let freq2 = freq1 * 1.618034 + h2 * 0.55; // Golden-ratio harmonic avoids periodic loops
+    let freq3 = 0.41 + h3 * 0.49;             // Slow non-periodic breeze swell envelope
+
+    let ph1 = h1 * 6.2831853;
+    let ph2 = h2 * 6.2831853;
+    let ph3 = h3 * 6.2831853;
+
+    // Spatial wind wave + local branch micro-turbulence
+    let wind_wave = dot(world_pos.xz, vec2<f32>(0.085, 0.065));
+    let branch_phase = dot(world_pos, vec3<f32>(1.35, 1.85, 1.45));
+    let gust = 0.72 + 0.28 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
+
+    let sway_a = (0.64 * sin(time_s * freq1 + ph1 + wind_wave)
+                + 0.26 * sin(time_s * freq2 + ph2)
+                + 0.10 * sin(time_s * (freq2 * 1.45) + branch_phase)) * gust;
+    let sway_b = (0.58 * cos(time_s * (freq1 * 0.89) + ph2 + wind_wave)
+                + 0.42 * sin(time_s * (freq2 * 1.13) + ph3 + branch_phase * 0.5)) * gust;
+
+    let dir_ang = 0.55 + (h3 - 0.5) * 1.15;
+    let dir_x = cos(dir_ang);
+    let dir_z = sin(dir_ang);
+
+    let dx = (dir_x * sway_a - dir_z * sway_b * 0.45) * flex;
+    let dz = (dir_z * sway_a + dir_x * sway_b * 0.45) * flex;
+    let dy = -0.16 * (abs(dx) + abs(dz));
+    return world_pos + vec3<f32>(dx, dy, dz);
+}
+
 // Skinning is pre-evaluated in skinning.wgsl compute shader prior to rendering.
 @vertex
 fn vs_scene(in: VertexInput) -> SceneOut {
-    let wp = obj.model * vec4<f32>(in.pos, 1.0);
+    let use_vtx_meta = obj.obj_info.w > 0.5;
+    var wp = obj.model * vec4<f32>(in.pos, 1.0);
+    if (use_vtx_meta && in.uv.x > 0.0001) {
+        wp = vec4<f32>(apply_vegetation_sway(wp.xyz, in.uv, frame.camera_pos.w), 1.0);
+    }
     let local_nrm = normalize(in.normal_mat.xyz);
     let raw_mat = u32(round(max(in.normal_mat.w * 127.0, 0.0)));
     let mat_id = raw_mat & 7u;
@@ -91,7 +135,6 @@ fn vs_scene(in: VertexInput) -> SceneOut {
     let vn = normalize((frame.view_mat * vec4<f32>(wn, 0.0)).xyz);
     let vp = frame.view_mat * wp;
 
-    let use_vtx_meta = obj.obj_info.w > 0.5;
     let v_obj_id = select(obj.obj_info.x, in.color.a, use_vtx_meta);
     let v_outline_w = select(obj.obj_info.y, f32((raw_mat >> 3u) & 7u) / 7.0, use_vtx_meta);
     let v_crease_s = select(obj.obj_info.z, select(0.0, 0.45, ((raw_mat >> 6u) & 1u) != 0u), use_vtx_meta);
