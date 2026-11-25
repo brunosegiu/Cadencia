@@ -5,18 +5,19 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
-use crate::assets::{f32_to_f16, AssetBank, MaterialRole, ModelId, SceneVertex};
+use crate::assets::{f32_to_f16, AssetBank, MaterialRole, ModelId, SceneVertex, SkeletonInfo, SkinWeightVertex};
 use crate::world::riders::{
     build_animal_draw_parts, build_rider_draw_parts, AiRider, DynamicAnimal, RiderPartDraw,
-    RiderPoseMode, RiderProfile,
+    RiderPoseMode, RiderProfile, MAX_CYCLIST_BONES,
 };
 use crate::world::terrain::{Frustum, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
-pub const MAX_SKINNED_VERTS: usize = 131072;
-pub const MAX_SKIN_JOBS: usize = 256;
+pub const MAX_SKINNED_VERTS: usize = 262144;
+pub const MAX_SKIN_JOBS: usize = 512;
+pub const MAX_SKIN_BONES: usize = 2048;
 pub const MAX_INDIRECT_COMMANDS: usize = 16384;
 
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +162,7 @@ pub struct SkinJob {
     pub src_offset: u32,
     pub dst_offset: u32,
     pub vertex_count: u32,
-    pub _pad: u32,
+    pub bone_offset: u32,
 }
 
 #[repr(C)]
@@ -263,8 +264,11 @@ pub struct LigneClaireRenderer {
     mega_ib: wgpu::Buffer,
     world_offsets: GpuWorldOffsets,
 
-    // Pre-render Compute Skinning resources
+    // Pre-render Compute Skinning resources (procedural quadrupeds/bipeds + true 4-bone glTF skeletal cyclists)
     skin_src_vb: wgpu::Buffer,
+    skin_weights_buf: wgpu::Buffer,
+    skin_bones_buf: wgpu::Buffer,
+    cyclist_skeleton: Option<SkeletonInfo>,
     skin_params_buf: wgpu::Buffer,
     skin_jobs_buf: wgpu::Buffer,
     skin_bgl: wgpu::BindGroupLayout,
@@ -345,7 +349,12 @@ impl LigneClaireRenderer {
 
         let mut models = HashMap::new();
         let mut static_model_verts: Vec<SceneVertex> = Vec::new();
+        let mut static_model_weights: Vec<SkinWeightVertex> = Vec::new();
         let mut static_model_indices: Vec<u32> = Vec::new();
+        let cyclist_skeleton = assets
+            .models
+            .get(&ModelId::RiderTorso)
+            .and_then(|m| m.skeleton.clone());
 
         for (&id, model) in &assets.models {
             let mut gpu_secs = Vec::new();
@@ -360,6 +369,7 @@ impl LigneClaireRenderer {
                 let index_count = sec.indices.len() as u32;
 
                 static_model_verts.extend_from_slice(&sec.vertices);
+                static_model_weights.extend_from_slice(&sec.skin_weights);
                 static_model_indices.extend_from_slice(&sec.indices);
 
                 gpu_secs.push(GpuMeshSection {
@@ -385,6 +395,17 @@ impl LigneClaireRenderer {
             label: Some("skin_src_vb"),
             contents: bytemuck::cast_slice(&static_model_verts),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let skin_weights_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("skin_weights_buf"),
+            contents: bytemuck::cast_slice(&static_model_weights),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+        let skin_bones_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skin_bones_buf"),
+            size: (std::mem::size_of::<[[f32; 4]; 4]>() * MAX_SKIN_BONES) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let initial_skinned_base = static_model_verts.len() as u32;
@@ -473,6 +494,30 @@ impl LigneClaireRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<SkinWeightVertex>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<[[f32; 4]; 4]>() as u64
+                        ),
+                    },
+                    count: None,
+                },
             ],
         });
         let skin_bg = Self::make_skin_bg(
@@ -482,6 +527,8 @@ impl LigneClaireRenderer {
             &skin_jobs_buf,
             &skin_src_vb,
             &mega_vb,
+            &skin_weights_buf,
+            &skin_bones_buf,
         );
         let skin_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skinning_shader"),
@@ -1206,6 +1253,9 @@ impl LigneClaireRenderer {
             mega_ib,
             world_offsets,
             skin_src_vb,
+            skin_weights_buf,
+            skin_bones_buf,
+            cyclist_skeleton,
             skin_params_buf,
             skin_jobs_buf,
             skin_bgl,
@@ -1264,6 +1314,7 @@ impl LigneClaireRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_skin_bg(
         device: &wgpu::Device,
         bgl: &wgpu::BindGroupLayout,
@@ -1271,6 +1322,8 @@ impl LigneClaireRenderer {
         jobs_buf: &wgpu::Buffer,
         src_vb: &wgpu::Buffer,
         dst_vb: &wgpu::Buffer,
+        weights_buf: &wgpu::Buffer,
+        bones_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skin_bg"),
@@ -1291,6 +1344,14 @@ impl LigneClaireRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: dst_vb.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: weights_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: bones_buf.as_entire_binding(),
                 },
             ],
         })
@@ -1810,6 +1871,8 @@ impl LigneClaireRenderer {
             &self.skin_jobs_buf,
             &self.skin_src_vb,
             &self.mega_vb,
+            &self.skin_weights_buf,
+            &self.skin_bones_buf,
         );
     }
 
@@ -2179,7 +2242,8 @@ impl LigneClaireRenderer {
         let mut draw_count = 0usize;
         let mut rider_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(96);
         let mut rider_cmds: Vec<EnqueuedCommandRef> = Vec::with_capacity(96);
-        let mut skin_jobs: Vec<SkinJob> = Vec::with_capacity(32);
+        let mut skin_jobs: Vec<SkinJob> = Vec::with_capacity(64);
+        let mut skin_bones: Vec<[[f32; 4]; 4]> = Vec::with_capacity(256);
         let mut max_skin_verts_in_job = 0u32;
         let mut skinned_vert_cursor = self.world_offsets.skinned_base_vertex;
 
@@ -2240,6 +2304,7 @@ impl LigneClaireRenderer {
             player_pose,
             player_profile,
             230,
+            self.cyclist_skeleton.as_ref(),
             &mut rider_parts,
         );
         if !is_menu {
@@ -2259,6 +2324,7 @@ impl LigneClaireRenderer {
                         RiderPoseMode::Pedaling,
                         &ai.profile,
                         base_id,
+                        self.cyclist_skeleton.as_ref(),
                         &mut rider_parts,
                     );
                 }
@@ -2279,6 +2345,19 @@ impl LigneClaireRenderer {
                 _ => (0.92, 0.0),
             };
             let is_skinned = rp.skin_pose_r[3] > 0.5;
+            let bone_offset = if let Some(mats) = &rp.bone_matrices {
+                if skin_bones.len() + MAX_CYCLIST_BONES <= MAX_SKIN_BONES {
+                    let off = skin_bones.len() as u32;
+                    for m in mats {
+                        skin_bones.push(m.to_cols_array_2d());
+                    }
+                    off
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
 
             for sec_idx in 0..sec_count {
                 if static_cmd_base + rider_draw_descs.len() >= MAX_INDIRECT_COMMANDS {
@@ -2320,7 +2399,7 @@ impl LigneClaireRenderer {
                         src_offset: ms.skin_src_offset,
                         dst_offset,
                         vertex_count: ms.vertex_count,
-                        _pad: 0,
+                        bone_offset,
                     });
                     dst_offset as i32
                 } else {
@@ -2343,7 +2422,7 @@ impl LigneClaireRenderer {
             }
         }
 
-        // Upload object uniforms, skinning jobs, and dynamic rider draw descriptors to GPU
+        // Upload object uniforms, skinning jobs, bone matrices, and dynamic rider draw descriptors to GPU
         let write_bytes = draw_count * self.obj_align;
         if write_bytes > 0 {
             queue.write_buffer(&self.obj_buf, 0, &self.obj_staging[..write_bytes]);
@@ -2358,6 +2437,9 @@ impl LigneClaireRenderer {
         queue.write_buffer(&self.skin_params_buf, 0, bytemuck::bytes_of(&skin_params));
         if !skin_jobs.is_empty() {
             queue.write_buffer(&self.skin_jobs_buf, 0, bytemuck::cast_slice(&skin_jobs));
+        }
+        if !skin_bones.is_empty() {
+            queue.write_buffer(&self.skin_bones_buf, 0, bytemuck::cast_slice(&skin_bones));
         }
 
         let cmd_count = (static_cmd_base + rider_draw_descs.len()) as u32;

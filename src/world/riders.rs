@@ -1,8 +1,10 @@
 use glam::{Mat4, Quat, Vec3};
 
-use crate::assets::ModelId;
+use crate::assets::{ModelId, SkeletonInfo};
 use crate::world::terrain::terrain_offset_y;
 use crate::world::{BiomeId, RouteSpline};
+
+pub const MAX_CYCLIST_BONES: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct RiderProfile {
@@ -60,6 +62,7 @@ pub struct RiderPartDraw {
     pub object_id: u32,
     pub skin_pose_r: [f32; 4],
     pub skin_pose_l: [f32; 4],
+    pub bone_matrices: Option<[Mat4; MAX_CYCLIST_BONES]>,
 }
 
 pub fn default_player_profile() -> RiderProfile {
@@ -439,6 +442,7 @@ pub fn step_ai_peloton(
 /// Note on glTF Y-up coordinate mapping from Blender (+Y forward, +Z up, +X right):
 /// In glTF / wgpu space: forward = -Z, up = +Y, right = +X!
 /// So a Blender point `(x, y, z)` becomes `(x, z, -y)` in local rider space.
+#[allow(clippy::too_many_arguments)]
 pub fn build_rider_draw_parts(
     spline: &RouteSpline,
     distance_m: f32,
@@ -451,6 +455,7 @@ pub fn build_rider_draw_parts(
     pose_mode: RiderPoseMode,
     profile: &RiderProfile,
     base_object_id: u32,
+    cyclist_skeleton: Option<&SkeletonInfo>,
     out: &mut Vec<RiderPartDraw>,
 ) {
     let s = spline.sample(distance_m);
@@ -487,12 +492,13 @@ pub fn build_rider_draw_parts(
     ) * Mat4::from_rotation_y(yaw_rot)
         * Mat4::from_rotation_z(-eff_lean_rad);
 
-    let push_skinned = |out: &mut Vec<RiderPartDraw>,
-                        model: ModelId,
-                        local: Mat4,
-                        id_off: u32,
-                        skin_pose_r: [f32; 4],
-                        skin_pose_l: [f32; 4]| {
+    let push_rigged = |out: &mut Vec<RiderPartDraw>,
+                       model: ModelId,
+                       local: Mat4,
+                       id_off: u32,
+                       skin_pose_r: [f32; 4],
+                       skin_pose_l: [f32; 4],
+                       bone_matrices: Option<[Mat4; MAX_CYCLIST_BONES]>| {
         out.push(RiderPartDraw {
             model,
             transform: basis * local,
@@ -505,7 +511,16 @@ pub fn build_rider_draw_parts(
             object_id: base_object_id + id_off,
             skin_pose_r,
             skin_pose_l,
+            bone_matrices,
         });
+    };
+    let push_skinned = |out: &mut Vec<RiderPartDraw>,
+                        model: ModelId,
+                        local: Mat4,
+                        id_off: u32,
+                        skin_pose_r: [f32; 4],
+                        skin_pose_l: [f32; 4]| {
+        push_rigged(out, model, local, id_off, skin_pose_r, skin_pose_l, None);
     };
     let push = |out: &mut Vec<RiderPartDraw>, model: ModelId, local: Mat4, id_off: u32| {
         push_skinned(out, model, local, id_off, [0.0; 4], [0.0; 4]);
@@ -597,14 +612,140 @@ pub fn build_rider_draw_parts(
         RiderPoseMode::MenuStopped => 0.45_f32,
     };
 
-    // Unified seamless skinned cyclist body + shorts + thighs + knees + calves + shoes (id +2)
-    push_skinned(
+    // Compute 16-bone hierarchical skeletal skinning matrices for the SINGLE unified rigged cyclist mesh
+    // (head, chin, hair, helmet, neck, torso, bridged arms, sculpted wrists, hands, pelvis, legs, socks & shoes!)
+    let head_yaw   = (0.055 * (time_s * 0.85 + rider_seed).sin() + 0.024 * anim_phase.cos() - eff_lean_rad * 0.30) * motion_scale;
+    let head_pitch = (0.030 * (anim_phase * 2.0).cos() + 0.018 * (time_s * 1.5 + rider_seed).sin()) * motion_scale;
+    let head_roll  = (-0.034 * anim_phase.sin() + 0.014 * (time_s * 1.2 + rider_seed).cos()) * motion_scale;
+    let spine_sway = 0.022 * anim_phase.sin() * motion_scale;
+    let spine_breath = 0.012 * (anim_phase * 2.0).sin() * motion_scale;
+
+    let pivot_rot = |pivot: Vec3, rot: Mat4| -> Mat4 {
+        Mat4::from_translation(pivot) * rot * Mat4::from_translation(-pivot)
+    };
+
+    let mut bone_mats = [Mat4::IDENTITY; MAX_CYCLIST_BONES];
+    let get_bind = |name: &str, fallback: Vec3| -> (Option<usize>, Vec3) {
+        if let Some(skel) = cyclist_skeleton {
+            if let Some(i) = skel.bone_index(name) {
+                let p = skel.bind_positions.get(i).copied().unwrap_or(fallback);
+                return (Some(i), p);
+            }
+        }
+        (None, fallback)
+    };
+    let set_bone = |mats: &mut [Mat4; MAX_CYCLIST_BONES], idx: Option<usize>, m: Mat4| {
+        if let Some(i) = idx {
+            if i < MAX_CYCLIST_BONES {
+                mats[i] = m;
+            }
+        }
+    };
+
+    let (i_pelvis, _)      = get_bind("Pelvis",     Vec3::ZERO);
+    let (i_spine, p_spine) = get_bind("Spine",      Vec3::new(0.0, 0.105, -0.030));
+    let (i_neck,  p_neck)  = get_bind("Neck",       Vec3::new(0.0, 0.428, -0.228));
+    let (i_head,  p_head)  = get_bind("Head",       Vec3::new(0.0, 0.514, -0.252));
+    let (i_th_r,  p_th_r)  = get_bind("Thigh_R",    Vec3::new( 0.102,  0.000,  0.000));
+    let (i_ca_r,  p_ca_r)  = get_bind("Calf_R",     Vec3::new( 0.102, -0.2673, -0.3368));
+    let (i_fo_r,  p_fo_r)  = get_bind("Foot_R",     Vec3::new( 0.124, -0.6477, -0.1979));
+    let (i_th_l,  p_th_l)  = get_bind("Thigh_L",    Vec3::new(-0.102,  0.000,  0.000));
+    let (i_ca_l,  p_ca_l)  = get_bind("Calf_L",     Vec3::new(-0.102, -0.2673, -0.3368));
+    let (i_fo_l,  p_fo_l)  = get_bind("Foot_L",     Vec3::new(-0.124, -0.6477, -0.1979));
+    let (i_ua_r,  p_ua_r)  = get_bind("UpperArm_R", Vec3::new( 0.172,  0.335, -0.195));
+    let (i_fa_r,  _p_fa_r) = get_bind("Forearm_R",  Vec3::new( 0.218,  0.082, -0.405));
+    let (i_ha_r,  _)       = get_bind("Hand_R",     Vec3::new( 0.198, -0.062, -0.574));
+    let (i_ua_l,  p_ua_l)  = get_bind("UpperArm_L", Vec3::new(-0.172,  0.335, -0.195));
+    let (i_fa_l,  _p_fa_l) = get_bind("Forearm_L",  Vec3::new(-0.218,  0.082, -0.405));
+    let (i_ha_l,  _)       = get_bind("Hand_L",     Vec3::new(-0.198, -0.062, -0.574));
+
+    let m_pelvis = Mat4::IDENTITY;
+    let m_spine = pivot_rot(
+        p_spine,
+        Mat4::from_euler(glam::EulerRot::YXZ, 0.0, spine_breath, -spine_sway),
+    );
+    let m_neck = m_spine
+        * pivot_rot(
+            p_neck,
+            Mat4::from_euler(
+                glam::EulerRot::YXZ,
+                head_yaw * 0.42,
+                head_pitch * 0.45,
+                head_roll * 0.40,
+            ),
+        );
+    let m_head = m_neck
+        * pivot_rot(
+            p_head,
+            Mat4::from_euler(
+                glam::EulerRot::YXZ,
+                head_yaw * 0.58,
+                head_pitch * 0.55,
+                head_roll * 0.60,
+            ),
+        );
+
+    // Legs: exact delta rotations from the seated Blender rest pose (REST_TH = 0.90, REST_CA = -0.35, REST_FO = 0.0)
+    let d_th_r = ang_r[0] - 0.90;
+    let d_ca_r = ang_r[1] - (-0.35);
+    let d_fo_r = ang_r[2];
+    let m_th_r = pivot_rot(p_th_r, Mat4::from_rotation_x(d_th_r));
+    let m_ca_r = m_th_r * pivot_rot(p_ca_r, Mat4::from_rotation_x(d_ca_r - d_th_r));
+    let m_fo_r = m_ca_r * pivot_rot(p_fo_r, Mat4::from_rotation_x(d_fo_r - d_ca_r));
+
+    let d_th_l = ang_l[0] - 0.90;
+    let d_ca_l = ang_l[1] - (-0.35);
+    let d_fo_l = ang_l[2];
+    let m_th_l = pivot_rot(p_th_l, Mat4::from_rotation_x(d_th_l));
+    let m_ca_l = m_th_l * pivot_rot(p_ca_l, Mat4::from_rotation_x(d_ca_l - d_th_l));
+    let m_fo_l = m_ca_l * pivot_rot(p_fo_l, Mat4::from_rotation_x(d_fo_l - d_ca_l));
+
+    // Arms & Hands: shoulders follow half-spine sway, elbows pump subtly, hands stay 100% locked onto brake hoods!
+    let m_ua_r = pivot_rot(
+        p_ua_r,
+        Mat4::from_euler(glam::EulerRot::YXZ, 0.0, spine_breath * 0.45, -spine_sway * 0.45),
+    );
+    let m_ua_l = pivot_rot(
+        p_ua_l,
+        Mat4::from_euler(glam::EulerRot::YXZ, 0.0, spine_breath * 0.45, -spine_sway * 0.45),
+    );
+    let m_fa_r = Mat4::from_translation(Vec3::new(
+        0.005 * anim_phase.sin() * motion_scale,
+        -0.004 * anim_phase.cos() * motion_scale,
+        0.0,
+    ));
+    let m_fa_l = Mat4::from_translation(Vec3::new(
+        0.005 * anim_phase.sin() * motion_scale,
+        0.004 * anim_phase.cos() * motion_scale,
+        0.0,
+    ));
+
+    set_bone(&mut bone_mats, i_pelvis, m_pelvis);
+    set_bone(&mut bone_mats, i_spine, m_spine);
+    set_bone(&mut bone_mats, i_neck, m_neck);
+    set_bone(&mut bone_mats, i_head, m_head);
+    set_bone(&mut bone_mats, i_th_r, m_th_r);
+    set_bone(&mut bone_mats, i_ca_r, m_ca_r);
+    set_bone(&mut bone_mats, i_fo_r, m_fo_r);
+    set_bone(&mut bone_mats, i_th_l, m_th_l);
+    set_bone(&mut bone_mats, i_ca_l, m_ca_l);
+    set_bone(&mut bone_mats, i_fo_l, m_fo_l);
+    set_bone(&mut bone_mats, i_ua_r, m_ua_r);
+    set_bone(&mut bone_mats, i_fa_r, m_fa_r);
+    set_bone(&mut bone_mats, i_ha_r, Mat4::IDENTITY);
+    set_bone(&mut bone_mats, i_ua_l, m_ua_l);
+    set_bone(&mut bone_mats, i_fa_l, m_fa_l);
+    set_bone(&mut bone_mats, i_ha_l, Mat4::IDENTITY);
+
+    // SINGLE unified rigged cyclist mesh (mode = 8.0 = true 4-bone glTF skeletal skinning!)
+    push_rigged(
         out,
         ModelId::RiderTorso,
         Mat4::from_translation(hip_center),
         2,
-        [ang_r[0], ang_r[1], ang_r[2], 1.0],
+        [ang_r[0], ang_r[1], ang_r[2], 8.0],
         [ang_l[0], ang_l[1], ang_l[2], anim_phase],
+        Some(bone_mats),
     );
     if profile.has_backpack {
         // Backpack follows upper-body sway & breathing heave via skin_pose_r.w = 2.0
@@ -617,29 +758,6 @@ pub fn build_rider_draw_parts(
             [0.0, 0.0, 0.0, anim_phase],
         );
     }
-
-    // Neck & Head subtle idle + pedaling animation (toned down ~15%: shoulder-follow sway, breathing bob, look-around yaw, nod pitch, counter-roll)
-    let head_sway_x = 0.011 * anim_phase.sin();
-    let head_bob_y  = 0.0076 * (anim_phase * 2.0).sin() + 0.0042 * (anim_phase * 0.85).cos();
-    let head_fwd_z  = -0.006 * (anim_phase * 2.0).sin();
-    let head_yaw    = (0.055 * (time_s * 0.85 + rider_seed).sin() + 0.024 * anim_phase.cos() - eff_lean_rad * 0.30) * motion_scale;
-    let head_pitch  = (0.032 * (anim_phase * 2.0).cos() + 0.019 * (time_s * 1.5 + rider_seed).sin()) * motion_scale;
-    let head_roll   = (-0.036 * anim_phase.sin() + 0.015 * (time_s * 1.2 + rider_seed).cos()) * motion_scale;
-
-    let head_xform = Mat4::from_translation(Vec3::new(
-        head_sway_x,
-        (hip_y + 0.490) + head_bob_y,
-        -0.015 + head_fwd_z,
-    )) * Mat4::from_euler(glam::EulerRot::YXZ, head_yaw, head_pitch, head_roll);
-
-    // Share object_id (+2) with RiderTorso so the post-processing outline shader never draws an artificial
-    // horizontal object_id seam line across the middle of the bare skin neck!
-    push(
-        out,
-        ModelId::RiderHeadHelmet,
-        head_xform,
-        2,
-    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1217,6 +1335,7 @@ pub fn build_animal_draw_parts(
                 a.species.eat_pitch_max_rad(),
                 a.species.leg_swing_amp_rad(),
             ],
+            bone_matrices: None,
         });
     }
 }

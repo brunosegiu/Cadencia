@@ -1,6 +1,34 @@
 use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
-use glam::{Vec2, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct SkinWeightVertex {
+    pub joints: [u8; 4],
+    pub weights: [u8; 4],
+}
+
+impl Default for SkinWeightVertex {
+    fn default() -> Self {
+        Self {
+            joints: [0, 0, 0, 0],
+            weights: [255, 0, 0, 0],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SkeletonInfo {
+    pub bone_names: Vec<String>,
+    pub bind_positions: Vec<Vec3>,
+}
+
+impl SkeletonInfo {
+    pub fn bone_index(&self, name: &str) -> Option<usize> {
+        self.bone_names.iter().position(|n| n == name)
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -190,6 +218,7 @@ pub enum MaterialRole {
 #[derive(Debug, Clone)]
 pub struct MeshSection {
     pub vertices: Vec<SceneVertex>,
+    pub skin_weights: Vec<SkinWeightVertex>,
     pub indices: Vec<u32>,
     pub role: MaterialRole,
     pub base_color: [f32; 4],
@@ -198,6 +227,7 @@ pub struct MeshSection {
 #[derive(Debug, Clone)]
 pub struct LoadedModel {
     pub sections: Vec<MeshSection>,
+    pub skeleton: Option<SkeletonInfo>,
     pub bounding_radius: f32,
 }
 
@@ -266,6 +296,32 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
     let blob = gltf.blob.as_deref();
     let mut sections = Vec::new();
 
+    // Parse optional glTF skeletal skin (joint names + mesh-local bind pivot positions from inverse bind matrices)
+    let skeleton = gltf.skins().next().map(|skin| {
+        let reader = skin.reader(|buf| match buf.source() {
+            gltf::buffer::Source::Bin => blob,
+            gltf::buffer::Source::Uri(_) => None,
+        });
+        let ibms: Vec<Mat4> = reader
+            .read_inverse_bind_matrices()
+            .map(|iter| iter.map(|m| Mat4::from_cols_array_2d(&m)).collect())
+            .unwrap_or_default();
+        let mut bone_names = Vec::new();
+        let mut bind_positions = Vec::new();
+        for (ji, node) in skin.joints().enumerate() {
+            bone_names.push(node.name().unwrap_or("").to_string());
+            let bind_pos = ibms
+                .get(ji)
+                .map(|ibm| ibm.inverse().w_axis.truncate())
+                .unwrap_or(Vec3::ZERO);
+            bind_positions.push(bind_pos);
+        }
+        SkeletonInfo {
+            bone_names,
+            bind_positions,
+        }
+    });
+
     for mesh in gltf.meshes() {
         for prim in mesh.primitives() {
             let reader = prim.reader(|buf| match buf.source() {
@@ -286,6 +342,34 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
             } else {
                 vec![[0.0, 0.0]; positions.len()]
             };
+            let joints_raw: Option<Vec<[u16; 4]>> =
+                reader.read_joints(0).map(|j| j.into_u16().collect());
+            let weights_raw: Option<Vec<[f32; 4]>> =
+                reader.read_weights(0).map(|w| w.into_f32().collect());
+            let mut skin_weights = Vec::with_capacity(positions.len());
+            for i in 0..positions.len() {
+                if let (Some(js), Some(ws)) = (&joints_raw, &weights_raw) {
+                    let j = js[i];
+                    let w = ws[i];
+                    let w_sum = (w[0] + w[1] + w[2] + w[3]).max(1e-5);
+                    skin_weights.push(SkinWeightVertex {
+                        joints: [
+                            (j[0].min(255)) as u8,
+                            (j[1].min(255)) as u8,
+                            (j[2].min(255)) as u8,
+                            (j[3].min(255)) as u8,
+                        ],
+                        weights: [
+                            ((w[0] / w_sum).clamp(0.0, 1.0) * 255.0).round() as u8,
+                            ((w[1] / w_sum).clamp(0.0, 1.0) * 255.0).round() as u8,
+                            ((w[2] / w_sum).clamp(0.0, 1.0) * 255.0).round() as u8,
+                            ((w[3] / w_sum).clamp(0.0, 1.0) * 255.0).round() as u8,
+                        ],
+                    });
+                } else {
+                    skin_weights.push(SkinWeightVertex::default());
+                }
+            }
             let indices: Vec<u32> = if let Some(idx_iter) = reader.read_indices() {
                 idx_iter.into_u32().collect()
             } else {
@@ -340,6 +424,7 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
 
             sections.push(MeshSection {
                 vertices,
+                skin_weights,
                 indices,
                 role,
                 base_color: color,
@@ -364,6 +449,7 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
 
     LoadedModel {
         sections,
+        skeleton,
         bounding_radius,
     }
 }

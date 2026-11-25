@@ -7,13 +7,18 @@ struct CompressedVertex {
     color: u32,      // Unorm8x4
 };
 
+struct SkinWeight {
+    joints: u32,  // 4x u8 bone indices
+    weights: u32, // 4x unorm8 bone weights
+};
+
 struct SkinJob {
-    skin_pose_r: vec4<f32>, // (thigh_ang_r, calf_ang_r, foot_ang_r, mode: 1.0 = full leg+torso LBS, 2.0 = backpack follow)
-    skin_pose_l: vec4<f32>, // (thigh_ang_l, calf_ang_l, foot_ang_l, anim_phase)
+    skin_pose_r: vec4<f32>, // w = mode: 1.0 = legacy legs, 2.0 = backpack, 3..6 = quadruped, 7 = biped walker, 8 = true 4-bone glTF skeleton
+    skin_pose_l: vec4<f32>,
     src_offset: u32,
     dst_offset: u32,
     vertex_count: u32,
-    _pad: u32,
+    bone_offset: u32,
 };
 
 struct SkinDispatchParams {
@@ -27,6 +32,8 @@ struct SkinDispatchParams {
 @group(0) @binding(1) var<storage, read> jobs: array<SkinJob>;
 @group(0) @binding(2) var<storage, read> src_verts: array<CompressedVertex>;
 @group(0) @binding(3) var<storage, read_write> dst_verts: array<CompressedVertex>;
+@group(0) @binding(4) var<storage, read> src_weights: array<SkinWeight>;
+@group(0) @binding(5) var<storage, read> bone_mats: array<mat4x4<f32>>;
 
 fn rot_x_vec(v: vec3<f32>, ang: f32) -> vec3<f32> {
     let c = cos(ang);
@@ -349,7 +356,26 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
     let unpacked_nrm = unpack4x8snorm(v.normal_mat);
     var local_nrm = normalize(unpacked_nrm.xyz);
 
-    if (job.skin_pose_r.w >= 6.5) {
+    if (job.skin_pose_r.w >= 7.5) {
+        // True glTF 4-bone skeletal skinning (single unified rigged cyclist mesh: head, neck, torso, arms, wrists, hands, pelvis, legs, feet)
+        let sw = src_weights[job.src_offset + vid];
+        let j0 = sw.joints & 255u;
+        let j1 = (sw.joints >> 8u) & 255u;
+        let j2 = (sw.joints >> 16u) & 255u;
+        let j3 = (sw.joints >> 24u) & 255u;
+        let w_raw = unpack4x8unorm(sw.weights);
+        let w_sum = max(w_raw.x + w_raw.y + w_raw.z + w_raw.w, 1e-5);
+        let wn = w_raw / w_sum;
+
+        let b = job.bone_offset;
+        let m = bone_mats[b + j0] * wn.x
+              + bone_mats[b + j1] * wn.y
+              + bone_mats[b + j2] * wn.z
+              + bone_mats[b + j3] * wn.w;
+        local_pos = (m * vec4<f32>(local_pos, 1.0)).xyz;
+        let nrm_mat = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
+        local_nrm = normalize(nrm_mat * local_nrm);
+    } else if (job.skin_pose_r.w >= 6.5) {
         let posed = animate_biped_pedestrian(local_pos, local_nrm, job.skin_pose_r, job.skin_pose_l);
         local_pos = posed.pos;
         local_nrm = posed.nrm;
