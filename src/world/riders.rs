@@ -70,12 +70,12 @@ pub fn default_player_profile() -> RiderProfile {
         name: "S. Miller",
         level: 12,
         w_per_kg: 2.8,
-        jersey_primary: [0.282, 0.573, 0.808, 1.0],   // cobalt sky blue (turnaround sheet)
-        jersey_secondary: [0.839, 0.306, 0.290, 1.0], // coral red panels & yoke
-        jersey_accent: [0.949, 0.800, 0.298, 1.0],    // golden yellow sleeve patches
-        helmet_color: [0.424, 0.455, 0.494, 1.0],     // matte slate grey vented shell
-        helmet_accent: [0.839, 0.322, 0.298, 1.0],    // coral-red aero ribs
-        frame_color: [0.463, 0.525, 0.588, 1.0],      // classic steel blue-grey road frame
+        jersey_primary: [0.310, 0.530, 0.730, 1.0],   // muted steel blue (turnaround sheet)
+        jersey_secondary: [0.770, 0.310, 0.290, 1.0], // dusty crimson red panels & yoke
+        jersey_accent: [0.910, 0.750, 0.310, 1.0],    // warm ochre yellow outer-sleeve patch & chest badge
+        helmet_color: [0.430, 0.460, 0.500, 1.0],     // matte slate-grey aero road shell
+        helmet_accent: [0.780, 0.310, 0.290, 1.0],    // dusty crimson aero rib stripes
+        frame_color: [0.463, 0.525, 0.588, 1.0],      // classic slate-blue road frame
         has_backpack: true,
         avatar_skin: [226, 178, 140],
         avatar_hair: [156, 102, 62],
