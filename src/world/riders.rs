@@ -6,6 +6,20 @@ use crate::world::{BiomeId, RouteSpline};
 
 pub const MAX_CYCLIST_BONES: usize = 16;
 
+/// Bike-local (glTF: +X right, +Y up, -Z forward) origin of the `bike_computer.glb` out-front
+/// mount: the stem faceplate just ahead of the handlebar clamp on `bike_frame.glb`.
+pub const BIKE_COMPUTER_MOUNT: Vec3 = Vec3::new(0.0, 0.865, -0.365);
+
+/// Corners of the head unit's display face in `bike_computer.glb` model space, ordered
+/// top-left, top-right, bottom-right, bottom-left as seen by the rider (top = far edge).
+/// Used to project the egui power / heart-rate readout onto the 3D screen.
+pub const BIKE_COMPUTER_SCREEN_CORNERS: [Vec3; 4] = [
+    Vec3::new(-0.020, 0.0413, -0.1117),
+    Vec3::new(0.020, 0.0413, -0.1117),
+    Vec3::new(0.020, 0.0282, -0.0593),
+    Vec3::new(-0.020, 0.0282, -0.0593),
+];
+
 #[derive(Debug, Clone)]
 pub struct RiderProfile {
     pub name: &'static str,
@@ -537,6 +551,9 @@ pub fn build_rider_draw_parts(
     // Bottom bracket: Blender (0, -0.070, 0.275) -> wgpu (0, 0.275, 0.070)
     let crank_rot = Mat4::from_rotation_x(-eff_crank_rad);
     push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.070)) * crank_rot, 0);
+
+    // GPS head unit on the out-front stem mount (shares the frame's object_id so no ink line splits them)
+    push(out, ModelId::BikeComputer, Mat4::from_translation(BIKE_COMPUTER_MOUNT), 0);
 
     // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430 thigh, l2 = 0.405 knee-to-low-cut-ankle)
     let hip_y = match pose_mode {

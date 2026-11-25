@@ -8,7 +8,7 @@ use wgpu::util::DeviceExt;
 use crate::assets::{f32_to_f16, AssetBank, MaterialRole, ModelId, SceneVertex, SkeletonInfo, SkinWeightVertex};
 use crate::world::riders::{
     build_animal_draw_parts, build_rider_draw_parts, AiRider, DynamicAnimal, RiderPartDraw,
-    RiderPoseMode, RiderProfile, MAX_CYCLIST_BONES,
+    RiderPoseMode, RiderProfile, BIKE_COMPUTER_SCREEN_CORNERS, MAX_CYCLIST_BONES,
 };
 use crate::world::terrain::{Frustum, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
@@ -254,6 +254,20 @@ struct StaticSectorCmd {
     caster_tier: u8,    // 0 = none, 1 = C0 only, 2 = C0..C1, 3 = C0..C2
 }
 
+/// Projects the head unit's display corners to normalized screen UV; `None` if any corner is behind the camera.
+fn project_head_unit_screen(model: Mat4, view_proj: Mat4) -> Option<[[f32; 2]; 4]> {
+    let mut out = [[0.0; 2]; 4];
+    for (o, c) in out.iter_mut().zip(BIKE_COMPUTER_SCREEN_CORNERS) {
+        let clip = view_proj * model.transform_point3(c).extend(1.0);
+        if clip.w <= 1e-4 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        *o = [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5];
+    }
+    Some(out)
+}
+
 pub struct LigneClaireRenderer {
     pub output_format: wgpu::TextureFormat,
     models: HashMap<ModelId, GpuModel>,
@@ -333,6 +347,9 @@ pub struct LigneClaireRenderer {
     prev_jitter_uv: [f32; 2],
     prev_cam_pos: Vec3,
     last_camera_mode: Option<CameraMode>,
+    /// Player head-unit display corners in normalized screen UV (0..1, top-left origin) from the
+    /// last rendered frame, set only in `CameraMode::ChestPov`. Consumed by the egui HUD next frame.
+    pub head_unit_screen_uv: Option<[[f32; 2]; 4]>,
     last_biome: Option<BiomeId>,
 
     gbuf: GBufferTargets,
@@ -1311,6 +1328,7 @@ impl LigneClaireRenderer {
             prev_jitter_uv: [0.0; 2],
             prev_cam_pos: Vec3::ZERO,
             last_camera_mode: None,
+            head_unit_screen_uv: None,
             last_biome: None,
             gbuf,
             egui_renderer,
@@ -2317,6 +2335,14 @@ impl LigneClaireRenderer {
             self.cyclist_skeleton.as_ref(),
             &mut rider_parts,
         );
+        self.head_unit_screen_uv = if camera_mode == CameraMode::ChestPov {
+            rider_parts
+                .iter()
+                .find(|p| p.model == ModelId::BikeComputer)
+                .and_then(|p| project_head_unit_screen(p.transform, unjittered_view_proj))
+        } else {
+            None
+        };
         if !is_menu {
             for (ai_idx, ai) in ai_riders.iter().enumerate() {
                 let s = spline.sample(ai.distance_m);
@@ -2351,7 +2377,7 @@ impl LigneClaireRenderer {
             let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
-                ModelId::BikeFrame | ModelId::BikeCrank => (0.86, 0.0),
+                ModelId::BikeFrame | ModelId::BikeCrank | ModelId::BikeComputer => (0.86, 0.0),
                 _ => (0.92, 0.0),
             };
             let is_skinned = rp.skin_pose_r[3] > 0.5;
