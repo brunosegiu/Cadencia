@@ -212,6 +212,7 @@ struct GpuMeshSection {
 struct GpuModel {
     sections: Vec<GpuMeshSection>,
     bounding_radius: f32,
+    bounds_center: Vec3,
 }
 
 struct GpuWorldOffsets {
@@ -253,6 +254,12 @@ struct StaticSectorCmd {
     shadow_candidate: bool,
     caster_tier: u8,    // 0 = none, 1 = C0 only, 2 = C0..C1, 3 = C0..C2
 }
+
+/// Chest POV eye position relative to the rider's road contact point (metres, rider basis).
+const CHEST_POV_EYE_UP: f32 = 1.36;
+const CHEST_POV_EYE_FWD: f32 = 0.115;
+/// Chest POV near plane: small enough that the arms passing beside the lens are not clipped open.
+const CHEST_POV_NEAR_M: f32 = 0.06;
 
 /// Projects the head unit's display corners to normalized screen UV; `None` if any corner is behind the camera.
 fn project_head_unit_screen(model: Mat4, view_proj: Mat4) -> Option<[[f32; 2]; 4]> {
@@ -407,6 +414,7 @@ impl LigneClaireRenderer {
                 GpuModel {
                     sections: gpu_secs,
                     bounding_radius: model.bounding_radius,
+                    bounds_center: model.bounds_center,
                 },
             );
         }
@@ -2034,18 +2042,24 @@ impl LigneClaireRenderer {
                 player_pos + forward * 22.0 + up * 1.25,
                 64.0,
             ),
-            // Chest-mounted POV: just behind the shoulders, pitched ~12 deg down so the
-            // handlebars, stem, hands and forearms frame the bottom of the screen.
-            CameraMode::ChestPov => (
-                player_pos + up * 1.32 - forward * 0.15,
-                player_pos + forward * 10.0 - up * 2.1,
-                72.0,
-            ),
+            // Chest-mounted POV: sits just in front of the sternum (like a chest-strap action cam),
+            // so the shoulders are behind the lens and the arms enter whole from the screen edges.
+            // Pitched ~26 deg down so the bars, stem, head unit and hands frame the bottom.
+            CameraMode::ChestPov => {
+                let eye = player_pos + up * CHEST_POV_EYE_UP + forward * CHEST_POV_EYE_FWD;
+                (eye, eye + forward * 10.0 - up * 4.88, 76.0)
+            }
         };
         let fov_deg = (base_fov_deg + graphics.fov_offset_deg).clamp(32.0, 80.0);
 
         let aspect = target_width.max(1) as f32 / target_height.max(1) as f32;
-        let near = 0.25_f32;
+        // The chest cam has forearms ~0.1 m from the lens; everything else keeps the wider near plane
+        // for depth precision at the 1.9 km far plane.
+        let near = if camera_mode == CameraMode::ChestPov {
+            CHEST_POV_NEAR_M
+        } else {
+            0.25_f32
+        };
         let far = 1900.0_f32;
         let view_mat = Mat4::look_at_rh(cam_pos, cam_target, Vec3::Y);
         let unjittered_proj_mat = Mat4::perspective_rh(fov_deg.to_radians(), aspect, near, far);
@@ -2369,11 +2383,13 @@ impl LigneClaireRenderer {
         build_animal_draw_parts(biome, spline, animals, cam_pos, &mut rider_parts);
 
         for rp in &rider_parts {
-            let (sec_count, base_bound_r) = match self.models.get(&rp.model) {
-                Some(m) => (m.sections.len(), m.bounding_radius),
+            let (sec_count, base_bound_r, bounds_center) = match self.models.get(&rp.model) {
+                Some(m) => (m.sections.len(), m.bounding_radius, m.bounds_center),
                 None => continue,
             };
-            let pos = rp.transform.w_axis.truncate();
+            // Cull sphere centred on the model's AABB centre (not its origin), so tall parts such as
+            // the handlebars stay inside the sphere when the camera looks steeply down (Chest POV).
+            let pos = rp.transform.transform_point3(bounds_center);
             let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),

@@ -230,7 +230,11 @@ pub struct MeshSection {
 pub struct LoadedModel {
     pub sections: Vec<MeshSection>,
     pub skeleton: Option<SkeletonInfo>,
+    /// Half-diagonal of the model-space AABB, measured from `bounds_center`.
     pub bounding_radius: f32,
+    /// Model-space AABB centre. Bounding spheres must be centred here, not at the model origin:
+    /// e.g. the bike frame's origin is at road level while its handlebars sit 0.93 m up.
+    pub bounds_center: Vec3,
 }
 
 pub struct AssetBank {
@@ -443,16 +447,17 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
             max_pt = max_pt.max(p);
         }
     }
-    let bounding_radius = if min_pt.x <= max_pt.x {
-        (0.5 * (max_pt - min_pt)).length().max(0.05)
+    let (bounding_radius, bounds_center) = if min_pt.x <= max_pt.x {
+        ((0.5 * (max_pt - min_pt)).length().max(0.05), 0.5 * (min_pt + max_pt))
     } else {
-        0.5
+        (0.5, Vec3::ZERO)
     };
 
     LoadedModel {
         sections,
         skeleton,
         bounding_radius,
+        bounds_center,
     }
 }
 
