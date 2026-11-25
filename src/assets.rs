@@ -375,8 +375,8 @@ impl AssetBank {
             (ModelId::BikeFrame, include_bytes!("../assets/models/bike_frame.glb")),
             (ModelId::BikeWheel, include_bytes!("../assets/models/bike_wheel.glb")),
             (ModelId::BikeCrank, include_bytes!("../assets/models/bike_crank.glb")),
-            (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Manifold Blender-built seated cyclist with sculpted wrists, balanced glutes & baked UV leg weights
-            (ModelId::RiderHeadHelmet, include_bytes!("../assets/models/rider_head_helmet.glb")), // Remodeled smooth chin & tucked submental throat
+            (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Manifold seated cyclist: aligned neck, flat athletic back, balanced glutes, sculpted wrists & UV leg weights
+            (ModelId::RiderHeadHelmet, include_bytes!("../assets/models/rider_head_helmet.glb")), // Sculpted chin & recessed skull-base neck socket
             (ModelId::RiderBackpack, include_bytes!("../assets/models/rider_backpack.glb")),
             (ModelId::RiderThigh, include_bytes!("../assets/models/rider_thigh.glb")),
             (ModelId::RiderCalfShoe, include_bytes!("../assets/models/rider_calf_shoe.glb")),
