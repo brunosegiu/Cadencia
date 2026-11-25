@@ -1607,6 +1607,7 @@ impl LigneClaireRenderer {
 
                             let local_y = sv.pos[1].max(0.0);
                             let r_xz = (sv.pos[0] * sv.pos[0] + sv.pos[2] * sv.pos[2]).sqrt();
+                            // Subtle wind flexibility (cut by 50% for calm, natural countryside breeze)
                             let sway_flex = match p.model {
                                 ModelId::TreeCanopy
                                 | ModelId::TreePine
@@ -1619,20 +1620,19 @@ impl LigneClaireRenderer {
                                     } else {
                                         0.45
                                     };
-                                    0.24 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
+                                    0.12 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
                                 }
                                 ModelId::PalmTree | ModelId::SmallPalm(_) => {
                                     let h_norm = ((local_y - 0.12).max(0.0) / 1.8).clamp(0.0, 1.45);
                                     let frond_out = (r_xz / 1.05).clamp(0.0, 1.4);
-                                    0.22
+                                    0.11
                                         * (h_norm * 0.45 + frond_out * h_norm.sqrt() * 0.95)
                                         * scale_factor
                                 }
                                 ModelId::PampasCortadera(_) => {
                                     let h_norm = (local_y / 1.45).clamp(0.0, 1.4);
                                     let blade_out = (r_xz / 0.65).clamp(0.0, 1.35);
-                                    // Both the arching grass blades (high blade_out) and tall plumes (high h_norm) sway visibly
-                                    0.22
+                                    0.11
                                         * (h_norm * h_norm * 0.85
                                             + blade_out * (local_y / 0.28).clamp(0.0, 1.0) * 0.75)
                                         * scale_factor
@@ -1642,15 +1642,15 @@ impl LigneClaireRenderer {
                                 | ModelId::BushCluster => {
                                     let h_norm = ((local_y - 0.03).max(0.0) / 0.95).clamp(0.0, 1.35);
                                     let out_norm = (r_xz / 0.65).clamp(0.0, 1.35);
-                                    0.18 * (h_norm * (0.65 + 0.65 * out_norm)) * scale_factor
+                                    0.09 * (h_norm * (0.65 + 0.65 * out_norm)) * scale_factor
                                 }
-                                ModelId::WildflowerTuft => {
-                                    let h_norm = (local_y / 0.26).clamp(0.0, 1.35);
-                                    0.11 * h_norm * scale_factor
+                                ModelId::WildflowerTuft | ModelId::CampoGrass(_) => {
+                                    let h_norm = (local_y / 0.30).clamp(0.0, 1.35);
+                                    0.055 * h_norm * scale_factor
                                 }
                                 ModelId::Flagpole => {
                                     if r_xz > 0.11 && local_y > 2.5 {
-                                        0.16 * ((r_xz - 0.10) / 1.0).clamp(0.0, 1.3) * scale_factor
+                                        0.08 * ((r_xz - 0.10) / 1.0).clamp(0.0, 1.3) * scale_factor
                                     } else {
                                         0.0
                                     }

@@ -471,30 +471,21 @@ pub fn spawn_biome_animals(biome: BiomeId, spline: &RouteSpline) -> Vec<DynamicA
         });
     };
 
-    // 1. Curated Hero Vista Animals at hero_start_dist_m (mix of EatingGrass, Walking, and Idle)
+    // 1. Curated Hero Vista Animals at hero_start_dist_m:
+    // Small, realistic Campo groups (a pair of 2 horses in the mid-meadow, a small mixed group of 2 cows + 1 horse
+    // on the distant pasture slope, 1 horse in the estancia paddock, and 1 mulita near the foreground grass).
     let hero_specs: &[(f32, f32, AnimalSpecies, u8, f32, f32, AnimalBehavior)] = &[
-        // Foreground Mulitas foraging & trotting along the grassy roadside bank
-        (6.4, -(road_hw + 0.85), AnimalSpecies::Mulita, 0, 1.25, 0.45, AnimalBehavior::Walking),
-        (11.6, road_hw + 1.05, AnimalSpecies::Mulita, 1, 1.22, -0.85, AnimalBehavior::EatingGrass),
-        (18.0, -(road_hw + 1.90), AnimalSpecies::Mulita, 2, 1.18, 1.20, AnimalBehavior::Walking),
-        // Mid-ground Horses in the open left meadow & right eucalyptus paddock
-        (34.0, -(road_hw + 5.8), AnimalSpecies::Horse, 0, 1.08, 1.25, AnimalBehavior::EatingGrass),
-        (37.5, -(road_hw + 3.8), AnimalSpecies::Horse, 1, 1.08, 0.35, AnimalBehavior::Walking),
-        (41.5, -(road_hw + 8.2), AnimalSpecies::Horse, 2, 1.06, 2.05, AnimalBehavior::EatingGrass),
-        (45.0, -(road_hw + 6.4), AnimalSpecies::Horse, 3, 1.05, -0.45, AnimalBehavior::Idle),
-        (25.0, road_hw + 7.5, AnimalSpecies::Horse, 3, 1.08, -1.25, AnimalBehavior::EatingGrass),
-        (30.5, road_hw + 10.5, AnimalSpecies::Horse, 0, 1.05, -0.55, AnimalBehavior::Walking),
-        // Flock of Sheep on the left grassy slope
-        (27.5, -(road_hw + 7.8), AnimalSpecies::Sheep, 0, 1.12, 0.80, AnimalBehavior::EatingGrass),
-        (29.8, -(road_hw + 9.6), AnimalSpecies::Sheep, 1, 1.10, 1.45, AnimalBehavior::Walking),
-        (31.4, -(road_hw + 7.0), AnimalSpecies::Sheep, 2, 1.12, 1.95, AnimalBehavior::EatingGrass),
-        (33.2, -(road_hw + 10.8), AnimalSpecies::Sheep, 3, 1.08, 0.30, AnimalBehavior::Idle),
-        (35.0, -(road_hw + 8.9), AnimalSpecies::Sheep, 0, 1.10, -0.40, AnimalBehavior::Walking),
-        // Mid-distant Cattle herd on the left rolling pasture hillside
-        (54.0, -(road_hw + 11.5), AnimalSpecies::Cow, 0, 1.10, 1.10, AnimalBehavior::EatingGrass),
-        (58.0, -(road_hw + 15.0), AnimalSpecies::Cow, 1, 1.10, 1.55, AnimalBehavior::Walking),
-        (62.5, -(road_hw + 9.5), AnimalSpecies::Cow, 2, 1.08, 0.45, AnimalBehavior::EatingGrass),
-        (66.0, -(road_hw + 17.5), AnimalSpecies::Cow, 3, 1.10, 2.25, AnimalBehavior::Idle),
+        // 1 foreground Mulita foraging by the left grass patch
+        (8.4, -(road_hw + 1.05), AnimalSpecies::Mulita, 0, 1.22, 0.45, AnimalBehavior::Walking),
+        // Pair of 2 horses in the open left meadow
+        (34.5, -(road_hw + 5.6), AnimalSpecies::Horse, 0, 1.08, 1.25, AnimalBehavior::EatingGrass),
+        (38.0, -(road_hw + 4.2), AnimalSpecies::Horse, 1, 1.06, 0.45, AnimalBehavior::Walking),
+        // 1 horse grazing in the right estancia eucalyptus paddock
+        (27.5, road_hw + 8.2, AnimalSpecies::Horse, 3, 1.08, -1.20, AnimalBehavior::EatingGrass),
+        // Small mixed group of 2 cows and 1 horse on the distant left pasture hillside
+        (56.0, -(road_hw + 11.8), AnimalSpecies::Cow, 0, 1.10, 1.10, AnimalBehavior::EatingGrass),
+        (59.5, -(road_hw + 14.2), AnimalSpecies::Cow, 1, 1.08, 1.55, AnimalBehavior::Idle),
+        (62.0, -(road_hw + 10.6), AnimalSpecies::Horse, 2, 1.06, 0.55, AnimalBehavior::EatingGrass),
     ];
 
     for (idx, &(d_off, lat_m, species, variant, sc, rel_yaw, behavior)) in
@@ -512,75 +503,75 @@ pub fn spawn_biome_animals(biome: BiomeId, spline: &RouteSpline) -> Vec<DynamicA
         );
     }
 
-    // 2. Roadside Mulitas foraging along the 1.6 km Campo loop
-    let mut d = 0.0_f32;
-    let mut idx = 0_u32;
-    while d < total {
-        let rel_hero = (d - hero_d).rem_euclid(total);
-        if !(0.0..48.0).contains(&rel_hero) {
-            let r_mul = animal_hash(idx * 157 + 7);
-            if r_mul > 0.87 {
-                let side = if idx % 3 == 0 { 1.0_f32 } else { -1.0_f32 };
-                let lat_m = side * (road_hw + 1.15 + (r_mul - 0.87) * 18.0);
-                let m_var = (idx % 4) as u8;
-                let beh = match idx % 3 {
-                    0 => AnimalBehavior::Walking,
-                    1 => AnimalBehavior::EatingGrass,
+    // 2. Rare, small natural groups across the rest of the 1.6 km Campo loop (every 155..245 m):
+    // - Group 0: Pair of 2 horses
+    // - Group 1: Mixed group of cows and horses (2 cows + 1 horse)
+    // - Group 2: Small flock of 3 sheep
+    // - Group 3: Pair of 2 cows + 1 nearby foraging mulita
+    let mut herd_d = 175.0_f32;
+    let mut h_idx = 0_u32;
+    while herd_d < total - 95.0 {
+        let rel_hero = (herd_d - hero_d).rem_euclid(total);
+        if !(0.0..115.0).contains(&rel_hero) && rel_hero < total - 75.0 {
+            let hs = h_idx.wrapping_mul(173).wrapping_add(19);
+            let r0 = animal_hash(hs);
+            let side = if h_idx % 2 == 0 { -1.0_f32 } else { 1.0_f32 };
+            let base_lat = side * (road_hw + 7.0 + r0 * 22.0);
+            let group_kind = h_idx % 4;
+
+            let group_members: &[(AnimalSpecies, f32, f32)] = match group_kind {
+                0 => &[
+                    // Pair of 2 horses
+                    (AnimalSpecies::Horse, -1.8, -1.4),
+                    (AnimalSpecies::Horse, 2.1, 1.6),
+                ],
+                1 => &[
+                    // Mixed group of 2 cows and 1 horse
+                    (AnimalSpecies::Cow, -2.5, -1.8),
+                    (AnimalSpecies::Cow, 1.4, 2.2),
+                    (AnimalSpecies::Horse, 3.6, -1.2),
+                ],
+                2 => &[
+                    // Small group of 3 sheep
+                    (AnimalSpecies::Sheep, -1.6, -1.2),
+                    (AnimalSpecies::Sheep, 0.8, 1.5),
+                    (AnimalSpecies::Sheep, 2.2, -0.6),
+                ],
+                _ => &[
+                    // Pair of 2 cows + 1 mulita near the roadside grass
+                    (AnimalSpecies::Cow, -1.9, 0.8),
+                    (AnimalSpecies::Cow, 2.4, -1.5),
+                    (AnimalSpecies::Mulita, 0.0, -5.0 * side),
+                ],
+            };
+
+            for (m_i, &(species, off_d, off_lat)) in group_members.iter().enumerate() {
+                let ms = hs + (m_i as u32) * 29;
+                let md = (herd_d + off_d + (animal_hash(ms + 1) - 0.5) * 2.5).rem_euclid(total);
+                let raw_lat = base_lat + off_lat + (animal_hash(ms + 2) - 0.5) * 2.0;
+                let min_l = if species == AnimalSpecies::Mulita {
+                    road_hw + 1.15
+                } else {
+                    road_hw + 3.2
+                };
+                let safe_lat = if side < 0.0 {
+                    raw_lat.min(-min_l)
+                } else {
+                    raw_lat.max(min_l)
+                };
+                let v = ((m_i as u32 + h_idx) % 4) as u8;
+                let sc = 0.98 + animal_hash(ms + 3) * 0.14;
+                let yaw = (animal_hash(ms + 4) - 0.5) * std::f32::consts::TAU;
+                let beh = match (h_idx + m_i as u32) % 3 {
+                    0 => AnimalBehavior::EatingGrass,
+                    1 => AnimalBehavior::Walking,
                     _ => AnimalBehavior::Idle,
                 };
-                let yaw = (animal_hash(idx * 61) - 0.5) * 3.0;
-                let sc = 1.12 + (r_mul - 0.87) * 1.4;
-                push_animal(
-                    AnimalSpecies::Mulita,
-                    m_var,
-                    d,
-                    lat_m,
-                    yaw,
-                    sc,
-                    beh,
-                    500 + idx,
-                );
+                push_animal(species, v, md, safe_lat, yaw, sc, beh, 2000 + ms);
             }
         }
-        d += 4.0;
-        idx += 1;
-    }
-
-    // 3. Distributed herds of Horses, Cows, and Sheep flocks across the 1.6 km Campo loop
-    let mut herd_d = 95.0_f32;
-    let mut h_idx = 0_u32;
-    while herd_d < total - 40.0 {
-        let hs = h_idx.wrapping_mul(173).wrapping_add(19);
-        let r0 = animal_hash(hs);
-        let r1 = animal_hash(hs + 13);
-        let side = if h_idx % 2 == 0 { -1.0_f32 } else { 1.0_f32 };
-        let base_lat = side * (road_hw + 6.5 + r0 * 26.0);
-        let herd_kind = h_idx % 3;
-        let (species, members) = match herd_kind {
-            0 => (AnimalSpecies::Horse, 3 + (h_idx % 3)),
-            1 => (AnimalSpecies::Cow, 4 + (h_idx % 4)),
-            _ => (AnimalSpecies::Sheep, 5 + (h_idx % 5)),
-        };
-        for m_i in 0..members {
-            let ms = hs + m_i * 29;
-            let md = (herd_d + (animal_hash(ms + 1) - 0.5) * 11.0).rem_euclid(total);
-            let mlat = base_lat + (animal_hash(ms + 2) - 0.5) * 8.0;
-            let safe_lat = if side < 0.0 {
-                mlat.min(-(road_hw + 2.2))
-            } else {
-                mlat.max(road_hw + 2.2)
-            };
-            let v = ((m_i + h_idx) % 4) as u8;
-            let sc = 0.96 + animal_hash(ms + 3) * 0.16;
-            let yaw = (animal_hash(ms + 4) - 0.5) * std::f32::consts::TAU;
-            let beh = match (h_idx + m_i) % 4 {
-                0 | 1 => AnimalBehavior::EatingGrass,
-                2 => AnimalBehavior::Walking,
-                _ => AnimalBehavior::Idle,
-            };
-            push_animal(species, v, md, safe_lat, yaw, sc, beh, 2000 + ms);
-        }
-        herd_d += 56.0 + r1 * 46.0;
+        let r_step = animal_hash(h_idx * 97 + 41);
+        herd_d += 155.0 + r_step * 85.0;
         h_idx += 1;
     }
 

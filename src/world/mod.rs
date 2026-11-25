@@ -437,7 +437,11 @@ mod tests {
         let campo_sp = RouteSpline::for_biome(BiomeId::RollingRuralGravel);
         let mut animals =
             crate::world::riders::spawn_biome_animals(BiomeId::RollingRuralGravel, &campo_sp);
-        assert!(animals.len() >= 80, "expected >= 80 dynamic Campo animals");
+        assert!(
+            animals.len() >= 18 && animals.len() <= 42,
+            "expected sparse natural Campo animal groups (got {})",
+            animals.len()
+        );
         assert!(animals
             .iter()
             .any(|a| a.behavior == crate::world::riders::AnimalBehavior::Walking));
@@ -469,7 +473,7 @@ mod tests {
                     || (a.walk_phase - *p0).abs() > 0.05
             })
             .count();
-        assert!(moved_count > 30, "expected walking animals to advance position and walk_phase");
+        assert!(moved_count >= 8, "expected walking animals to advance position and walk_phase");
 
         let hero_s = campo_sp.sample(campo_sp.hero_start_dist_m);
         let cam_pos = hero_s.pos - hero_s.tangent * 4.5 + Vec3::Y * 2.0;
@@ -482,8 +486,9 @@ mod tests {
             &mut draw_parts,
         );
         assert!(
-            draw_parts.len() >= 15,
-            "expected visible dynamic animals in Campo hero vista"
+            draw_parts.len() >= 5 && draw_parts.len() <= 14,
+            "expected sparse visible dynamic animals in Campo hero vista (got {})",
+            draw_parts.len()
         );
         assert!(draw_parts.iter().all(|p| p.skin_pose_r[3] >= 3.0));
     }

@@ -1155,162 +1155,131 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 idx += 1;
             }
 
-            // 1b. Non-regular 2D Poisson-cluster countryside shrub, Cortaderia, Chirca & wildflower patches
-            // Distributed organically across near verges, mid-slopes, and far rolling hills with wide open pasture gaps
-            let mut patch_d = 4.0_f32;
+            // 1b. Uruguayan Campo Bush Lumps & Pasture Grass Patches
+            // Matches aerial photography of Uruguayan Campo: wide open rolling green pastures interrupted by
+            // tight, cohesive "lumps" of bushes (often with no trees anywhere nearby) and occasional grass patches!
+            let mut lump_d = 14.0_f32;
             let mut p_seed = 300_u32;
-            while patch_d < total {
+            while lump_d < total {
                 p_seed = p_seed.wrapping_add(1);
                 let h0 = hash_u32(p_seed * 181 + 13);
                 let h1 = hash_u32(p_seed * 239 + 37);
                 let h2 = hash_u32(p_seed * 307 + 73);
                 let h3 = hash_u32(p_seed * 389 + 109);
 
-                let rel_hero = (patch_d - hero_d).rem_euclid(total);
-                let in_hero_foreground = (0.0..58.0).contains(&rel_hero);
+                let rel_hero = (lump_d - hero_d).rem_euclid(total);
+                let in_hero_foreground = (0.0..68.0).contains(&rel_hero);
 
-                let side = if h0 > 0.46 { -1.0_f32 } else { 1.0_f32 };
-                // Exponential-like lateral depth distribution: some near the verge (1.5..6m), many scattered 8..48m up the hillsides
+                let side = if h0 > 0.47 { -1.0_f32 } else { 1.0_f32 };
                 let depth_m = if in_hero_foreground {
-                    12.0 + h1 * 36.0
+                    18.0 + h1 * 32.0
                 } else {
-                    1.4 + (h1 * h1) * 46.0
+                    2.2 + (h1 * h1) * 44.0
                 };
                 let center_lat = side * (road_hw + depth_m);
-                let patch_kind = p_seed % 4;
 
-                match patch_kind {
-                    0 => {
-                        // Chirca hillside scrub patch (2..5 bushes with irregular 2D spread & varied scale)
-                        let count = 2 + ((h2 * 3.8) as u32);
-                        for k in 0..count {
-                            let ks = p_seed * 43 + k * 19;
-                            let off_d = (hash_u32(ks + 1) - 0.5) * 13.5;
-                            let off_lat = (hash_u32(ks + 2) - 0.5) * 11.0;
-                            let cd = (patch_d + off_d).rem_euclid(total);
-                            let clat = if side < 0.0 {
-                                (center_lat + off_lat).min(-(road_hw + 1.35))
-                            } else {
-                                (center_lat + off_lat).max(road_hw + 1.65)
-                            };
-                            let cs = spline.sample(cd);
-                            let cy = terrain_offset_y(biome, clat, cd, road_hw);
-                            let v_idx = ((ks / 3) % 10) as u8;
-                            let sc = 0.68 + hash_u32(ks + 3) * 0.54;
-                            push_prop(
-                                ModelId::ChircaBush(v_idx),
-                                cs.pos + cs.right * clat + Vec3::Y * (cy - 0.06),
-                                hash_u32(ks + 4) * 6.28,
-                                Vec3::splat(sc),
-                                [1.0; 4],
-                                0.84,
-                                0.0,
-                                true,
-                            );
-                        }
-                    }
-                    1 => {
-                        // Cortaderia selloana (Pampas grass) tussock colony in lower/mid meadow swales (1..3 tussocks)
-                        let swale_lat = side * (road_hw + 1.55 + (h1 * h1) * 14.5);
-                        let count = 1 + ((h2 * 2.6) as u32);
-                        for k in 0..count {
-                            let ks = p_seed * 53 + k * 23;
-                            let off_d = (hash_u32(ks + 1) - 0.5) * 9.5;
-                            let off_lat = (hash_u32(ks + 2) - 0.5) * 6.5;
-                            let cd = (patch_d + off_d).rem_euclid(total);
-                            let clat = if side < 0.0 {
-                                (swale_lat + off_lat).clamp(-(road_hw + 18.0), -(road_hw + 1.45))
-                            } else {
-                                (swale_lat + off_lat).clamp(road_hw + 1.75, road_hw + 18.0)
-                            };
-                            let cs = spline.sample(cd);
-                            let cy = terrain_offset_y(biome, clat, cd, road_hw);
-                            let v_idx = ((ks / 5) % 10) as u8;
-                            let sc = 0.74 + hash_u32(ks + 3) * 0.44;
-                            push_prop(
-                                ModelId::PampasCortadera(v_idx),
-                                cs.pos + cs.right * clat + Vec3::Y * (cy - 0.05),
-                                hash_u32(ks + 4) * 6.28,
-                                Vec3::splat(sc),
-                                [1.0; 4],
-                                0.84,
-                                0.0,
-                                true,
-                            );
-                        }
-                    }
-                    2 => {
-                        // Mixed Ceibo flowering shrub or Small Butiá Palm with satellite Chirca/Wildflowers
-                        let main_v = ((p_seed / 3) % 10) as u8;
-                        let main_model = if h2 > 0.48 {
-                            ModelId::CeiboBush(main_v)
+                if p_seed % 3 != 2 {
+                    // Tight Bush Lump (4..7 bushes clustered closely within a 2.0..5.2m radius, plus grass & occasional rock)
+                    let bush_count = 4 + ((h2 * 3.8) as u32);
+                    let lump_radius = 2.2 + h3 * 3.0;
+                    for k in 0..bush_count {
+                        let ks = p_seed * 43 + k * 19;
+                        let ang = (k as f32 / bush_count as f32) * std::f32::consts::TAU
+                            + (hash_u32(ks + 1) - 0.5) * 0.9;
+                        let r_dist = hash_u32(ks + 2).sqrt() * lump_radius;
+                        let cd = (lump_d + ang.cos() * r_dist).rem_euclid(total);
+                        let raw_lat = center_lat + ang.sin() * r_dist;
+                        let clat = if side < 0.0 {
+                            raw_lat.min(-(road_hw + 1.55))
                         } else {
-                            ModelId::SmallPalm(main_v)
+                            raw_lat.max(road_hw + 1.85)
                         };
-                        let cs = spline.sample(patch_d);
-                        let cy = terrain_offset_y(biome, center_lat, patch_d, road_hw);
+                        let cs = spline.sample(cd);
+                        let cy = terrain_offset_y(biome, clat, cd, road_hw);
+                        let v_idx = ((ks / 3) % 10) as u8;
+                        let kind_r = hash_u32(ks + 5);
+                        let (b_model, sc) = if kind_r < 0.62 {
+                            (ModelId::ChircaBush(v_idx), 0.72 + hash_u32(ks + 3) * 0.46)
+                        } else if kind_r < 0.84 && clat.abs() < road_hw + 22.0 {
+                            (ModelId::PampasCortadera(v_idx), 0.76 + hash_u32(ks + 3) * 0.38)
+                        } else {
+                            (ModelId::CeiboBush(v_idx), 0.74 + hash_u32(ks + 3) * 0.40)
+                        };
                         push_prop(
-                            main_model,
-                            cs.pos + cs.right * center_lat + Vec3::Y * (cy - 0.08),
-                            h3 * 6.28,
-                            Vec3::splat(0.82 + h2 * 0.38),
+                            b_model,
+                            cs.pos + cs.right * clat + Vec3::Y * (cy - 0.06),
+                            hash_u32(ks + 4) * 6.28,
+                            Vec3::splat(sc),
                             [1.0; 4],
-                            0.85,
+                            0.84,
                             0.0,
                             true,
                         );
-                        if h3 > 0.35 {
-                            let sat_d = (patch_d + (h0 - 0.5) * 6.5).rem_euclid(total);
-                            let sat_lat = center_lat + side * (1.8 + h1 * 3.5);
-                            let ss = spline.sample(sat_d);
-                            let sy = terrain_offset_y(biome, sat_lat, sat_d, road_hw);
-                            push_prop(
-                                ModelId::ChircaBush(((p_seed + 4) % 10) as u8),
-                                ss.pos + ss.right * sat_lat + Vec3::Y * (sy - 0.06),
-                                h0 * 6.28,
-                                Vec3::splat(0.70 + h3 * 0.35),
-                                [1.0; 4],
-                                0.82,
-                                0.0,
-                                true,
-                            );
-                        }
                     }
-                    _ => {
-                        // Natural 2D wildflower meadow cluster (3..6 tufts in an organic patch, not a straight line!)
-                        let fl_base_lat = side * (road_hw + 0.85 + (h1 * h1) * 14.0);
-                        let count = 3 + ((h2 * 3.9) as u32);
-                        for k in 0..count {
-                            let ks = p_seed * 67 + k * 17;
-                            let fd = (patch_d + (hash_u32(ks + 1) - 0.5) * 5.2).rem_euclid(total);
-                            let flat = if side < 0.0 {
-                                (fl_base_lat + (hash_u32(ks + 2) - 0.5) * 4.2).min(-(road_hw + 0.65))
-                            } else {
-                                (fl_base_lat + (hash_u32(ks + 2) - 0.5) * 4.2).max(road_hw + 0.65)
-                            };
-                            let fs = spline.sample(fd);
-                            let fy = terrain_offset_y(biome, flat, fd, road_hw);
-                            let fsc = 0.75 + hash_u32(ks + 3) * 0.55;
-                            push_prop(
-                                ModelId::WildflowerTuft,
-                                fs.pos + fs.right * flat + Vec3::Y * (fy - 0.06),
-                                hash_u32(ks + 4) * 6.28,
-                                Vec3::splat(fsc),
-                                [1.0; 4],
-                                0.55,
-                                0.0,
-                                false,
-                            );
-                        }
+                    // Anchor the bush lump with 2..4 CampoGrass tufts around its perimeter
+                    for g_k in 0..3_u32 {
+                        let gs = p_seed * 71 + g_k * 13;
+                        let gang = hash_u32(gs + 1) * std::f32::consts::TAU;
+                        let gr = lump_radius * (0.65 + hash_u32(gs + 2) * 0.55);
+                        let gd = (lump_d + gang.cos() * gr).rem_euclid(total);
+                        let glat = if side < 0.0 {
+                            (center_lat + gang.sin() * gr).min(-(road_hw + 0.95))
+                        } else {
+                            (center_lat + gang.sin() * gr).max(road_hw + 1.15)
+                        };
+                        let gs_s = spline.sample(gd);
+                        let gy = terrain_offset_y(biome, glat, gd, road_hw);
+                        push_prop(
+                            ModelId::CampoGrass(((gs / 3) % 10) as u8),
+                            gs_s.pos + gs_s.right * glat + Vec3::Y * (gy - 0.03),
+                            hash_u32(gs + 3) * 6.28,
+                            Vec3::splat(0.85 + hash_u32(gs + 4) * 0.50),
+                            [1.0; 4],
+                            0.58,
+                            0.0,
+                            false,
+                        );
+                    }
+                } else {
+                    // Pure Pasture Grass & Wildflower Patch in the open grassland (4..8 grass clumps)
+                    let grass_base_lat = side * (road_hw + 0.85 + (h1 * h1) * 18.0);
+                    let count = 4 + ((h2 * 4.5) as u32);
+                    for k in 0..count {
+                        let ks = p_seed * 67 + k * 17;
+                        let fd = (lump_d + (hash_u32(ks + 1) - 0.5) * 4.8).rem_euclid(total);
+                        let flat = if side < 0.0 {
+                            (grass_base_lat + (hash_u32(ks + 2) - 0.5) * 3.8).min(-(road_hw + 0.55))
+                        } else {
+                            (grass_base_lat + (hash_u32(ks + 2) - 0.5) * 3.8).max(road_hw + 0.65)
+                        };
+                        let fs = spline.sample(fd);
+                        let fy = terrain_offset_y(biome, flat, fd, road_hw);
+                        let is_flower = k == 0 && h3 > 0.45;
+                        let g_model = if is_flower {
+                            ModelId::WildflowerTuft
+                        } else {
+                            ModelId::CampoGrass(((ks / 3) % 10) as u8)
+                        };
+                        let fsc = 0.80 + hash_u32(ks + 3) * 0.55;
+                        push_prop(
+                            g_model,
+                            fs.pos + fs.right * flat + Vec3::Y * (fy - 0.03),
+                            hash_u32(ks + 4) * 6.28,
+                            Vec3::splat(fsc),
+                            [1.0; 4],
+                            0.55,
+                            0.0,
+                            false,
+                        );
                     }
                 }
 
-                // Irregular longitudinal step (6m to 25m) so patches never appear periodic
-                patch_d += 6.2 + h0 * h3 * 19.5;
+                // Wide open pasture intervals (24m to 62m) between bush lumps & grass patches
+                lump_d += 24.0 + h0 * 38.0;
             }
 
-            // 2. Non-repetitive geological rock veins & boulder clusters (Poisson-like irregular clusters, never periodic!)
-            let mut rock_d = 6.0_f32;
+            // 2. Non-repetitive geological rock outcrops & boulder lumps (sparse across open pastures)
+            let mut rock_d = 18.0_f32;
             let mut r_seed = 500_u32;
             while rock_d < total {
                 r_seed = r_seed.wrapping_add(1);
@@ -1318,22 +1287,21 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 let h1 = hash_u32(r_seed * 251 + 41);
                 let h2 = hash_u32(r_seed * 313 + 89);
 
-                // Irregular geological vein spacing (varies between 5m and 34m)
                 let vein_density = (rock_d * 0.037).sin() * 0.5 + (rock_d * 0.091).cos() * 0.5;
-                if vein_density > -0.25 {
+                if vein_density > -0.05 {
                     let side = if h0 > 0.36 { -1.0_f32 } else { 1.0_f32 };
-                    let center_lat = side * (road_hw + 3.2 + h1 * 38.0);
-                    let cluster_count = 1 + ((h2 * 3.8) as u32);
+                    let center_lat = side * (road_hw + 4.2 + h1 * 38.0);
+                    let cluster_count = 2 + ((h2 * 3.2) as u32);
 
                     for c_i in 0..cluster_count {
                         let cs = r_seed * 37 + c_i * 19;
-                        let off_d = (hash_u32(cs + 1) - 0.5) * 6.5;
-                        let off_lat = (hash_u32(cs + 2) - 0.5) * 5.8;
+                        let off_d = (hash_u32(cs + 1) - 0.5) * 4.5;
+                        let off_lat = (hash_u32(cs + 2) - 0.5) * 4.2;
                         let cur_d = (rock_d + off_d).rem_euclid(total);
                         let cur_lat = if side < 0.0 {
-                            (center_lat + off_lat).min(-(road_hw + 1.8))
+                            (center_lat + off_lat).min(-(road_hw + 2.0))
                         } else {
-                            (center_lat + off_lat).max(road_hw + 2.2)
+                            (center_lat + off_lat).max(road_hw + 2.4)
                         };
                         let sc_sample = spline.sample(cur_d);
                         let y_r = terrain_offset_y(biome, cur_lat, cur_d, road_hw);
@@ -1353,38 +1321,45 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                         );
                     }
                 }
-                rock_d += 5.5 + h0 * h1 * 26.0;
+                rock_d += 22.0 + h0 * h1 * 48.0;
             }
 
-            // 3. Natural Monte Criollo tree groves (Eucalyptus, Ombu, Ceibo & Small Palms) with irregular spacing
-            let mut grove_d = 10.0_f32;
+            // 3. Rare, Tight Tree Lumps ("Montes" / "Isletas") — trees are rare and clustered tightly together!
+            // Leave the opening hero vista left hillsides wide open (start first loop tree lump well past hero_d)
+            let mut grove_d = (hero_d + 165.0).rem_euclid(total);
+            let mut g_traversed = 0.0_f32;
             let mut g_seed = 1200_u32;
-            while grove_d < total {
+            while g_traversed < total - 180.0 {
                 g_seed = g_seed.wrapping_add(1);
                 let h0 = hash_u32(g_seed * 167 + 29);
                 let h1 = hash_u32(g_seed * 229 + 53);
                 let h2 = hash_u32(g_seed * 293 + 71);
 
-                let side = if h0 > 0.44 { 1.0_f32 } else { -1.0_f32 };
-                let base_lat = side * (road_hw + 5.5 + h1 * 48.0);
-                let trees_in_grove = 1 + ((h2 * 4.2) as u32);
+                let side = if h0 > 0.45 { 1.0_f32 } else { -1.0_f32 };
+                let base_lat = side * (road_hw + 12.0 + h1 * 38.0);
+                // Tight copse of 5..8 trees within a 5.5m radius + underbrush bush lump around its base
+                let trees_in_lump = 5 + ((h2 * 3.8) as u32);
+                let copse_radius = 4.5 + h0 * 3.2;
 
-                for t_i in 0..trees_in_grove {
+                for t_i in 0..trees_in_lump {
                     let ts = g_seed * 59 + t_i * 23;
-                    let td = (grove_d + (hash_u32(ts + 1) - 0.5) * 14.0).rem_euclid(total);
+                    let ang = (t_i as f32 / trees_in_lump as f32) * std::f32::consts::TAU
+                        + (hash_u32(ts + 1) - 0.5) * 0.7;
+                    let r_off = hash_u32(ts + 2).sqrt() * copse_radius;
+                    let td = (grove_d + ang.cos() * r_off).rem_euclid(total);
                     let tlat = if side < 0.0 {
-                        (base_lat + (hash_u32(ts + 2) - 0.5) * 12.0).min(-(road_hw + 3.5))
+                        (base_lat + ang.sin() * r_off).min(-(road_hw + 6.0))
                     } else {
-                        (base_lat + (hash_u32(ts + 2) - 0.5) * 12.0).max(road_hw + 3.0)
+                        (base_lat + ang.sin() * r_off).max(road_hw + 6.0)
                     };
                     let s = spline.sample(td);
                     let ty = terrain_offset_y(biome, tlat, td, road_hw);
-                    let tree_model = if hash_u32(ts + 3) > 0.76 {
+                    let tree_model = if hash_u32(ts + 3) > 0.80 {
                         ModelId::SmallPalm(((ts / 5) % 10) as u8)
                     } else {
                         pick_tree(ts)
                     };
-                    let sc = 0.88 + hash_u32(ts + 4) * 0.48;
+                    let sc = 0.90 + hash_u32(ts + 4) * 0.42;
                     push_prop(
                         tree_model,
                         s.pos + s.right * tlat + Vec3::Y * (ty - 0.25),
@@ -1396,12 +1371,35 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                         true,
                     );
                 }
+                // Underbrush bush lump skirting the edge of the tree lump
+                for b_i in 0..4_u32 {
+                    let bs = g_seed * 83 + b_i * 19;
+                    let bang = hash_u32(bs + 1) * std::f32::consts::TAU;
+                    let br = copse_radius * (0.75 + hash_u32(bs + 2) * 0.45);
+                    let bd = (grove_d + bang.cos() * br).rem_euclid(total);
+                    let blat = base_lat + bang.sin() * br;
+                    let s = spline.sample(bd);
+                    let by = terrain_offset_y(biome, blat, bd, road_hw);
+                    push_prop(
+                        ModelId::ChircaBush(((bs / 3) % 10) as u8),
+                        s.pos + s.right * blat + Vec3::Y * (by - 0.06),
+                        hash_u32(bs + 3) * 6.28,
+                        Vec3::splat(0.76 + hash_u32(bs + 4) * 0.35),
+                        [1.0; 4],
+                        0.82,
+                        0.0,
+                        true,
+                    );
+                }
 
-                grove_d += 11.0 + h0 * 24.0;
+                // 190m to 310m of open treeless campo between tree lumps!
+                let step_grove = 190.0 + h0 * 120.0;
+                grove_d = (grove_d + step_grove).rem_euclid(total);
+                g_traversed += step_grove;
             }
 
-            // 4. Estancia Ranch Houses & Hero Vista Composition (matching the reference illustration!)
-            for (ranch_i, &r_dist_off) in [56.0_f32, 420.0, 860.0, 1280.0].iter().enumerate() {
+            // 4. Estancia Ranch Houses (2 remote estancias along the 1.6 km loop, each sheltered by a tight tree lump)
+            for (ranch_i, &r_dist_off) in [56.0_f32, 860.0].iter().enumerate() {
                 let rd = (hero_d + r_dist_off).rem_euclid(total);
                 let rs = spline.sample(rd);
                 let ryaw = (-rs.tangent.x).atan2(-rs.tangent.z);
@@ -1459,22 +1457,28 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 }
             }
 
-            // Curated foreground flora & boulders at hero_start_dist_m with organic 2D depth variation (never a straight row!)
-            // (Dynamic moving & skinned Horses, Cows, Sheep, and Mulitas are spawned via `riders::spawn_biome_animals`)
+            // Curated foreground bush lumps, grass patches & boulder clusters at hero_start_dist_m
             for &(d_off, lat_off, model, sc, yaw_off) in &[
-                // Left foreground Ceibo flowering shrub & Pampas Cortadera tussocks separated cleanly in 2D
-                (7.8_f32, -(road_hw + 2.45), ModelId::CeiboBush(0), 0.90_f32, 0.4_f32),
-                (11.6, -(road_hw + 1.55), ModelId::PampasCortadera(1), 0.92, 1.1),
-                (14.8, -(road_hw + 5.20), ModelId::ChircaBush(2), 0.88, 2.0),
-                (18.6, -(road_hw + 8.40), ModelId::ChircaBush(7), 0.78, 0.8),
-                (21.5, -(road_hw + 1.85), ModelId::PampasCortadera(3), 0.88, 1.7),
-                (26.5, -(road_hw + 4.20), ModelId::CampoRockCluster(2), 0.85, 0.5),
-                (44.0, -(road_hw + 14.5), ModelId::CampoRockGranite(4), 1.05, 1.2),
-                (52.0, -(road_hw + 22.0), ModelId::CampoRockSlate(6), 1.15, 0.7),
-                // Right fence-side Butiá small palms & Chirca scrub at varied distances behind the fence
-                (15.5, road_hw + 2.45, ModelId::SmallPalm(0), 0.92, 0.3),
-                (18.8, road_hw + 4.30, ModelId::ChircaBush(5), 0.86, 2.2),
-                (23.5, road_hw + 5.60, ModelId::SmallPalm(3), 0.98, 1.4),
+                // Left foreground Bush Lump #1 (tight cluster of Ceibo, Cortadera, Chirca, rock & pasture grass tufts)
+                (8.6_f32, -(road_hw + 2.35), ModelId::CeiboBush(0), 0.90_f32, 0.4_f32),
+                (10.8, -(road_hw + 1.65), ModelId::PampasCortadera(1), 0.90, 1.1),
+                (11.4, -(road_hw + 3.15), ModelId::ChircaBush(2), 0.85, 2.0),
+                (9.8, -(road_hw + 3.45), ModelId::ChircaBush(7), 0.76, 0.8),
+                (7.8, -(road_hw + 1.45), ModelId::CampoGrass(0), 1.05, 0.5),
+                (9.4, -(road_hw + 1.15), ModelId::CampoGrass(3), 0.95, 1.8),
+                (12.2, -(road_hw + 2.10), ModelId::CampoGrass(6), 1.00, 2.5),
+                // Left mid-slope pure Bush Lump #2 (tight thicket of Chirca & rock on the open green hillside, no trees!)
+                (38.0, -(road_hw + 14.5), ModelId::CampoRockGranite(4), 1.05, 1.2),
+                (39.4, -(road_hw + 15.8), ModelId::ChircaBush(1), 0.88, 0.6),
+                (40.8, -(road_hw + 14.2), ModelId::ChircaBush(4), 0.82, 1.9),
+                (37.2, -(road_hw + 16.2), ModelId::ChircaBush(8), 0.78, 2.7),
+                (38.5, -(road_hw + 13.4), ModelId::CampoGrass(2), 1.05, 1.1),
+                // Right fence-side Small Palm & Chirca Lump + roadside grass patch
+                (15.8, road_hw + 2.35, ModelId::SmallPalm(0), 0.92, 0.3),
+                (17.4, road_hw + 3.15, ModelId::ChircaBush(5), 0.84, 2.2),
+                (18.6, road_hw + 2.15, ModelId::SmallPalm(3), 0.95, 1.4),
+                (14.5, road_hw + 1.35, ModelId::CampoGrass(1), 0.98, 0.9),
+                (16.8, road_hw + 1.45, ModelId::CampoGrass(5), 0.92, 2.1),
             ] {
                 let cd = (hero_d + d_off).rem_euclid(total);
                 let cs = spline.sample(cd);

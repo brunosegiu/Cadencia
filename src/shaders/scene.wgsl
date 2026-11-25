@@ -101,17 +101,17 @@ fn apply_vegetation_sway(world_pos: vec3<f32>, sway_uv: vec2<f32>, time_s: f32) 
     let ph2 = h2 * 6.2831853;
     let ph3 = h3 * 6.2831853;
 
-    // Spatial wind wave + local branch/blade turbulence so individual stems/fronds ripple organically
-    let wind_wave = dot(world_pos.xz, vec2<f32>(0.095, 0.075));
-    let branch_phase = dot(world_pos, vec3<f32>(2.15, 2.65, 2.25));
-    let gust = 0.85 + 0.35 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
+    // Spatial wind wave + gentle branch/blade turbulence (cut by 50%)
+    let wind_wave = dot(world_pos.xz, vec2<f32>(0.085, 0.065));
+    let branch_phase = dot(world_pos, vec3<f32>(1.55, 1.95, 1.65));
+    let gust = 0.82 + 0.18 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
 
-    let sway_a = (0.72 * sin(time_s * freq1 + ph1 + wind_wave)
-                + 0.34 * sin(time_s * freq2 + ph2)
-                + 0.22 * sin(time_s * (freq2 * 1.42) + branch_phase)) * gust;
-    let sway_b = (0.64 * cos(time_s * (freq1 * 0.91) + ph2 + wind_wave)
-                + 0.44 * sin(time_s * (freq2 * 1.17) + ph3 + branch_phase * 0.6)) * gust;
-    let flutter_y = 0.24 * sin(time_s * (freq2 * 1.35) + branch_phase + ph1) * flex;
+    let sway_a = (0.68 * sin(time_s * freq1 + ph1 + wind_wave)
+                + 0.28 * sin(time_s * freq2 + ph2)
+                + 0.11 * sin(time_s * (freq2 * 1.42) + branch_phase)) * gust;
+    let sway_b = (0.60 * cos(time_s * (freq1 * 0.91) + ph2 + wind_wave)
+                + 0.32 * sin(time_s * (freq2 * 1.17) + ph3 + branch_phase * 0.5)) * gust;
+    let flutter_y = 0.12 * sin(time_s * (freq2 * 1.35) + branch_phase + ph1) * flex;
 
     let dir_ang = 0.55 + (h3 - 0.5) * 1.25;
     let dir_x = cos(dir_ang);
