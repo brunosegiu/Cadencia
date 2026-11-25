@@ -2483,7 +2483,7 @@ impl LigneClaireRenderer {
         }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("cadence_encoder"),
+            label: Some("cadencia_encoder"),
         });
 
         // -----------------------------------------------------------------

@@ -1,15 +1,15 @@
 [package]
-name = "cadence"
+name = "cadencia"
 version = "0.1.0"
 edition = "2021"
-description = "Cross-platform Ligne Claire stylized indoor cycling training app (Rust + WebGPU/wgpu + WASM)"
+description = "Cross-platform indoor cycling training app (Rust + WebGPU/wgpu + WASM)"
 
 [lib]
-name = "cadence_lib"
+name = "cadencia_lib"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "cadence"
+name = "cadencia"
 path = "src/main.rs"
 
 [features]

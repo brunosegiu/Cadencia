@@ -1,6 +1,6 @@
-# AGENTS.md — Cadence Architecture & Engineering Rules
+# AGENTS.md — Cadencia Architecture & Engineering Rules
 
-This document defines the architectural invariants, rendering pipeline rules, aesthetic constraints, and verification workflow for **Cadence**, a cross-platform *Ligne Claire* stylized indoor cycling training application written in **Rust** (`wgpu 30.0` + WGSL, `winit 0.30`, `egui 0.37`, `btleplug 0.13`) targeting **Windows, Linux, Android, and Web (WASM)**.
+This document defines the architectural invariants, rendering pipeline rules, aesthetic constraints, and verification workflow for **Cadencia**, a cross-platform *Ligne Claire* stylized indoor cycling training application written in **Rust** (`wgpu 30.0` + WGSL, `winit 0.30`, `egui 0.37`, `btleplug 0.13`) targeting **Windows, Linux, Android, and Web (WASM)**.
 
 All AI coding agents and contributors must follow these rules whenever modifying or extending the codebase.
 
@@ -14,9 +14,9 @@ All AI coding agents and contributors must follow these rules whenever modifying
      - `cargo build --offline`
      - `cargo run --offline -- ...`
      - `cargo check --offline --target wasm32-unknown-unknown --no-default-features`
-     - `powershell -ExecutionPolicy Bypass -File .\build_android_apk.ps1` (builds `aarch64-linux-android` release `libcadence_lib.so` and packages/signs `cadence.apk`)
+     - `powershell -ExecutionPolicy Bypass -File .\build_android_apk.ps1` (builds `aarch64-linux-android` release `libcadencia_lib.so` and packages/signs `cadencia.apk`)
 2. **Keep Library and Binary Target Names Distinct (`Cargo.toml`):**
-   - In `Cargo.toml`, `[lib]` must remain `name = "cadence_lib"` (`crate-type = ["cdylib", "rlib"]`) and `[[bin]]` must remain `name = "cadence"`. Never give `[lib]` and `[[bin]]` the same name, as Windows MSVC builds will emit `cadence.pdb` output filename collision warnings.
+   - In `Cargo.toml`, `[lib]` must remain `name = "cadencia_lib"` (`crate-type = ["cdylib", "rlib"]`) and `[[bin]]` must remain `name = "cadencia"`. Never give `[lib]` and `[[bin]]` the same name, as Windows MSVC builds will emit `cadencia.pdb` output filename collision warnings.
 3. **ALWAYS Use the Blender MCP for 3D Modeling (NEVER Procedural Rust Meshes for Props/Models):**
    - All 3D models (vegetation, trees, palms, bushes, rocks, animals, buildings, vehicles, avatars, props) **MUST** be created and exported as `.glb` files into `assets/models/` using the **Blender MCP** (`execute_blender_code` / `blender` MCP tools) and loaded via `load_glb` in `src/assets.rs`.
    - **NEVER** write procedural mesh-building code in Rust to generate 3D prop, vegetation, rock, or animal models.
@@ -51,7 +51,7 @@ All AI coding agents and contributors must follow these rules whenever modifying
 | Path | Responsibility |
 | :--- | :--- |
 | `src/main.rs` | Desktop CLI entry point supporting `--level <cerro\|rambla\|campo>`, `--screenshot <path>`, `--biome <name>`, `--screen <main_menu\|world_select\|settings\|gear\|ingame>`, `--camera <mode>`, `--width <px>`, `--height <px>`. |
-| `src/lib.rs` | Application state loop (`CadenceSim`, `WindowGpuState`), desktop `run_windowed`, WASM `run_web`, Android `android_main`, and 8-frame TAA-converged `render_headless_screenshot_screen`. |
+| `src/lib.rs` | Application state loop (`CadenciaSim`, `WindowGpuState`), desktop `run_windowed`, WASM `run_web`, Android `android_main`, and 8-frame TAA-converged `render_headless_screenshot_screen`. |
 | `src/assets.rs` | Compressed 24-byte `SceneVertex` format, `SceneVertex::new_packed_prop` per-vertex metadata packing, and `AssetBank` (procedural + embedded glTF models). |
 | `src/world/mod.rs` | `BiomeId` (`MountainClimb`, `CoastalPromenade`, `RollingRuralGravel`), closed-loop 3D Catmull-Rom `RouteSpline`, and world unit tests. |
 | `src/world/terrain.rs` | 3D `WorldOctree` (`OCTREE_MAX_DEPTH = 4`, `MAX_OCTREE_SECTORS = 126`), `WorldSector` leaf chunks, Gribb-Hartmann 6-plane `Frustum`, procedural road/terrain/wire/water mesh generation, and biome prop placement. |

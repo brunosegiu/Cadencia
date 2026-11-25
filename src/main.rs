@@ -1,9 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
-use cadence_lib::renderer::CameraMode;
+use cadencia_lib::renderer::CameraMode;
 #[cfg(not(target_arch = "wasm32"))]
-use cadence_lib::ui::AppScreen;
+use cadencia_lib::ui::AppScreen;
 #[cfg(not(target_arch = "wasm32"))]
-use cadence_lib::world::BiomeId;
+use cadencia_lib::world::BiomeId;
 
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
@@ -91,14 +91,14 @@ fn main() {
             });
             let biome = explicit_biome.unwrap_or_else(BiomeId::random);
             if let Err(err) =
-                cadence_lib::render_headless_screenshot_screen(&out, biome, screen, width, height, camera)
+                cadencia_lib::render_headless_screenshot_screen(&out, biome, screen, width, height, camera)
             {
                 eprintln!("Screenshot failed: {err}");
                 std::process::exit(1);
             }
             println!("Saved screenshot to {out}");
         } else {
-            cadence_lib::run_windowed(direct_level);
+            cadencia_lib::run_windowed(direct_level);
         }
     }
 }

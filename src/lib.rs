@@ -27,7 +27,7 @@ use crate::world::riders::{
 use crate::world::terrain::{build_biome_world, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
-pub struct CadenceSim {
+pub struct CadenciaSim {
     pub screen: AppScreen,
     pub biome: BiomeId,
     pub spline: RouteSpline,
@@ -47,7 +47,7 @@ pub struct CadenceSim {
     pub time_s: f32,
 }
 
-impl CadenceSim {
+impl CadenciaSim {
     pub fn new(biome: BiomeId, camera_mode: CameraMode) -> Self {
         Self::new_with_screen(biome, AppScreen::InGame, camera_mode)
     }
@@ -244,7 +244,7 @@ struct WindowGpuState {
     renderer: LigneClaireRenderer,
     egui_ctx: egui::Context,
     egui_winit: egui_winit::State,
-    sim: CadenceSim,
+    sim: CadenciaSim,
     last_frame: Instant,
     save_screenshot_flag: bool,
 }
@@ -276,7 +276,7 @@ impl WindowGpuState {
             .expect("GPU adapter");
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("cadence_device"),
+                label: Some("cadencia_device"),
                 required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 ..Default::default()
             })
@@ -294,7 +294,7 @@ impl WindowGpuState {
             Some(b) => (b, AppScreen::InGame, CameraMode::Chase),
             None => (BiomeId::random(), AppScreen::MainMenu, CameraMode::MainMenu),
         };
-        let sim = CadenceSim::new_with_screen(biome, screen, cam);
+        let sim = CadenciaSim::new_with_screen(biome, screen, cam);
         renderer.upload_world(&device, &sim.world_geo);
 
         let egui_ctx = egui::Context::default();
@@ -475,20 +475,20 @@ impl WindowGpuState {
     }
 }
 
-struct CadenceApp {
+struct CadenciaApp {
     #[allow(dead_code)]
     initial_level: Option<BiomeId>,
     state: Option<WindowGpuState>,
 }
 
-impl ApplicationHandler for CadenceApp {
+impl ApplicationHandler for CadenciaApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
         #[allow(unused_mut)]
         let mut attrs = Window::default_attributes()
-            .with_title("Cadence — Ligne Claire Indoor Cycling")
+            .with_title("Cadencia")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 960.0));
 
         #[cfg(target_arch = "wasm32")]
@@ -497,7 +497,7 @@ impl ApplicationHandler for CadenceApp {
             use winit::platform::web::WindowAttributesExtWebSys;
             let canvas = web_sys::window()
                 .and_then(|w| w.document())
-                .and_then(|d| d.get_element_by_id("cadence-canvas"))
+                .and_then(|d| d.get_element_by_id("cadencia-canvas"))
                 .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok());
             if let Some(c) = canvas {
                 attrs = attrs.with_canvas(Some(c));
@@ -615,7 +615,7 @@ impl ApplicationHandler for CadenceApp {
 pub fn run_windowed(initial_level: Option<BiomeId>) {
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = CadenceApp {
+    let mut app = CadenciaApp {
         initial_level,
         state: None,
     };
@@ -632,10 +632,10 @@ pub fn run_web() {
     let event_loop = EventLoop::new().expect("wasm event loop");
     #[allow(deprecated)]
     let window = {
-        let mut attrs = Window::default_attributes().with_title("Cadence");
+        let mut attrs = Window::default_attributes().with_title("Cadencia");
         if let Some(c) = web_sys::window()
             .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id("cadence-canvas"))
+            .and_then(|d| d.get_element_by_id("cadencia-canvas"))
             .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
         {
             attrs = attrs.with_canvas(Some(c));
@@ -697,7 +697,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
         .build()
         .expect("android event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = CadenceApp {
+    let mut app = CadenciaApp {
         initial_level: None,
         state: None,
     };
@@ -734,7 +734,7 @@ pub fn render_headless_screenshot_screen(
     .map_err(|e| format!("adapter error: {e:?}"))?;
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("cadence_headless_dev"),
+        label: Some("cadencia_headless_dev"),
         ..Default::default()
     }))
     .map_err(|e| format!("device error: {e:?}"))?;
@@ -742,7 +742,7 @@ pub fn render_headless_screenshot_screen(
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let assets = AssetBank::load_embedded();
     let mut renderer = LigneClaireRenderer::new(&device, format, width, height, &assets);
-    let mut sim = CadenceSim::new_with_screen(biome, screen, camera_mode);
+    let mut sim = CadenciaSim::new_with_screen(biome, screen, camera_mode);
     renderer.upload_world(&device, &sim.world_geo);
 
     let out_tex = device.create_texture(&wgpu::TextureDescriptor {

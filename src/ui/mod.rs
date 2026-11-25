@@ -50,7 +50,7 @@ impl Language {
     pub fn detect_os() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            for var in ["CADENCE_LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+            for var in ["CADENCIA_LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
                 if let Ok(val) = std::env::var(var) {
                     if let Some(lang) = Self::from_locale_tag(&val) {
                         return lang;
@@ -1065,8 +1065,8 @@ pub fn draw_hud(
         let lang = hud_state.language;
         egui::Window::new(tr(
             lang,
-            "Cadence Control & Trainer Hub",
-            "Centro de Control y Rodillo Cadence",
+            "Cadencia Control & Trainer Hub",
+            "Centro de Control y Rodillo Cadencia",
         ))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
@@ -1173,7 +1173,7 @@ pub fn draw_hud(
                 );
                 ui.add(
                     egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0)
-                        .text(tr(lang, "Cadence (RPM)", "Cadencia (RPM)")),
+                        .text(tr(lang, "Cadencia (RPM)", "Cadencia (RPM)")),
                 );
                 ui.add(
                     egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0)
@@ -1485,7 +1485,7 @@ fn draw_main_menu(ctx: &egui::Context, lang: Language) -> HudActions {
     let scale_y = (h / 960.0).clamp(0.65, 1.6);
     let scale = scale_x.min(scale_y);
 
-    egui::Area::new(egui::Id::unique("cadence_main_menu_cluster"))
+    egui::Area::new(egui::Id::unique("cadencia_main_menu_cluster"))
         .fade_in(false)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
@@ -1710,7 +1710,7 @@ fn draw_world_select(ctx: &egui::Context, lang: Language) -> HudActions {
     let scale_y = (h / 960.0).clamp(0.65, 1.6);
     let scale = scale_x.min(scale_y);
 
-    egui::Area::new(egui::Id::unique("cadence_world_select"))
+    egui::Area::new(egui::Id::unique("cadencia_world_select"))
         .fade_in(false)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
@@ -1909,7 +1909,7 @@ fn draw_settings_screen(
     let scale = scale_x.min(scale_y);
     let lang = hud_state.language;
 
-    egui::Area::new(egui::Id::unique("cadence_settings_backdrop"))
+    egui::Area::new(egui::Id::unique("cadencia_settings_backdrop"))
         .fade_in(false)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
@@ -2085,7 +2085,7 @@ fn draw_settings_screen(
                 );
                 cols[1].add(
                     egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0)
-                        .text(tr(lang, "Sim Cadence (RPM)", "Cadencia Sim (RPM)")),
+                        .text(tr(lang, "Sim Cadencia (RPM)", "Cadencia Sim (RPM)")),
                 );
                 cols[1].add(
                     egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0)
@@ -2148,7 +2148,7 @@ fn draw_avatar_editor_screen(ctx: &egui::Context, lang: Language) -> HudActions 
 
     // Left blank as requested ("Gear opens the avatar editor screen. For now leave the avatar editor screen blank.")
     // with only a discrete Back button in the top-left corner so the player can return to the Main Menu.
-    egui::Area::new(egui::Id::unique("cadence_avatar_editor_blank"))
+    egui::Area::new(egui::Id::unique("cadencia_avatar_editor_blank"))
         .fade_in(false)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {

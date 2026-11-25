@@ -15,10 +15,10 @@ $env:CXX_aarch64_linux_android = "$ndkBin\aarch64-linux-android26-clang++.cmd"
 $env:AR_aarch64_linux_android = "$ndkBin\llvm-ar.exe"
 $env:CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS = "-C link-arg=-Wl,-z,max-page-size=16384"
 
-Write-Host "==> 1. Compiling Rust aarch64-linux-android shared library (libcadence_lib.so)..."
+Write-Host "==> 1. Compiling Rust aarch64-linux-android shared library (libcadencia_lib.so)..."
 cargo build --offline --release --lib --target aarch64-linux-android --no-default-features
 
-$soPath = "target\aarch64-linux-android\release\libcadence_lib.so"
+$soPath = "target\aarch64-linux-android\release\libcadencia_lib.so"
 if (-not (Test-Path $soPath)) {
     throw "Failed to locate compiled $soPath"
 }
@@ -35,8 +35,8 @@ Write-Host "==> 2. Linking AndroidManifest.xml with aapt2..."
     --manifest "android\AndroidManifest.xml" `
     -I "$platformJar"
 
-Write-Host "==> 3. Stripping debug symbols & packaging lib/arm64-v8a/libcadence_lib.so..."
-& "$ndkBin\llvm-strip.exe" --strip-unneeded -o "$apkBuildDir\staging\lib\arm64-v8a\libcadence_lib.so" "$soPath"
+Write-Host "==> 3. Stripping debug symbols & packaging lib/arm64-v8a/libcadencia_lib.so..."
+& "$ndkBin\llvm-strip.exe" --strip-unneeded -o "$apkBuildDir\staging\lib\arm64-v8a\libcadencia_lib.so" "$soPath"
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -44,8 +44,8 @@ $zip = [System.IO.Compression.ZipFile]::Open("$PWD\$apkBuildDir\unaligned.apk", 
 try {
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
         $zip,
-        "$PWD\$apkBuildDir\staging\lib\arm64-v8a\libcadence_lib.so",
-        "lib/arm64-v8a/libcadence_lib.so",
+        "$PWD\$apkBuildDir\staging\lib\arm64-v8a\libcadencia_lib.so",
+        "lib/arm64-v8a/libcadencia_lib.so",
         [System.IO.Compression.CompressionLevel]::NoCompression
     ) | Out-Null
 } finally {
@@ -69,7 +69,7 @@ if (-not (Test-Path $keystore)) {
         -dname "CN=Android Debug,O=Android,C=US"
 }
 
-$finalApk = "cadence.apk"
+$finalApk = "cadencia.apk"
 Write-Host "==> 6. Signing APK with apksigner -> $finalApk..."
 & "$buildTools\apksigner.bat" sign `
     --ks "$keystore" `
