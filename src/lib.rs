@@ -521,7 +521,7 @@ impl ApplicationHandler for CadenceApp {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             self.state = None;
         }

@@ -77,6 +77,50 @@ impl Language {
             }
         }
 
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            use std::ffi::c_void;
+            #[link(name = "CoreFoundation", kind = "framework")]
+            extern "C" {
+                fn CFLocaleCopyCurrent() -> *const c_void;
+                fn CFLocaleGetIdentifier(locale: *const c_void) -> *const c_void;
+                fn CFStringGetCString(
+                    the_string: *const c_void,
+                    buffer: *mut u8,
+                    buffer_size: isize,
+                    encoding: u32,
+                ) -> u8;
+                fn CFRelease(cf: *const c_void);
+            }
+            const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+            unsafe {
+                let locale = CFLocaleCopyCurrent();
+                if !locale.is_null() {
+                    let ident = CFLocaleGetIdentifier(locale);
+                    let mut buf = [0u8; 64];
+                    let ok = if !ident.is_null() {
+                        CFStringGetCString(
+                            ident,
+                            buf.as_mut_ptr(),
+                            buf.len() as isize,
+                            K_CF_STRING_ENCODING_UTF8,
+                        ) != 0
+                    } else {
+                        false
+                    };
+                    CFRelease(locale);
+                    if ok {
+                        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                        if let Ok(s) = std::str::from_utf8(&buf[..len]) {
+                            if let Some(lang) = Self::from_locale_tag(s) {
+                                return lang;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(win) = web_sys::window() {
