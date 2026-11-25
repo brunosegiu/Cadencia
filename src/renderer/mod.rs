@@ -15,7 +15,7 @@ use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
-pub const MAX_SKINNED_VERTS: usize = 262144;
+pub const MAX_SKINNED_VERTS: usize = 524288;
 pub const MAX_SKIN_JOBS: usize = 512;
 pub const MAX_SKIN_BONES: usize = 2048;
 pub const MAX_INDIRECT_COMMANDS: usize = 16384;
