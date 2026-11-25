@@ -8,8 +8,8 @@
 fn vs_gbuf_prop(in: VertexInput) -> GBufferVertOut {
     let use_vtx_meta = obj.obj_info.w > 0.5;
     var wp = obj.model * vec4<f32>(in.pos, 1.0);
-    if (use_vtx_meta && in.uv.x > 0.0001) {
-        wp = vec4<f32>(apply_vegetation_sway(wp.xyz, in.uv, frame.camera_pos.w), 1.0);
+    if (use_vtx_meta && (in.uv.x > 0.0001 || in.uv.y > 0.0001)) {
+        wp = vec4<f32>(apply_vegetation_sway(wp.xyz, in.uv, in.color.a, frame.camera_pos.w), 1.0);
     }
     let local_nrm = normalize(in.normal_mat.xyz);
     let raw_mat = u32(round(max(in.normal_mat.w * 127.0, 0.0)));

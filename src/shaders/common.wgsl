@@ -87,43 +87,60 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-fn apply_vegetation_sway(world_pos: vec3<f32>, sway_uv: vec2<f32>, time_s: f32) -> vec3<f32> {
-    let flex = sway_uv.x;
-    if (flex <= 0.0001) {
+fn apply_vegetation_sway(
+    world_pos: vec3<f32>,
+    sway_uv: vec2<f32>,
+    obj_id_norm: f32,
+    time_s: f32,
+) -> vec3<f32> {
+    let stem_flex = sway_uv.x;
+    let leaf_turb = sway_uv.y;
+    if (stem_flex <= 0.0001 && leaf_turb <= 0.0001) {
         return world_pos;
     }
-    let seed = sway_uv.y;
+
+    // Per-plant constant seed from packed object_id (identical on every vertex of the same plant!)
+    let seed = round(obj_id_norm * 255.0);
     let h1 = fract(sin(seed * 12.9898) * 43758.5453);
     let h2 = fract(sin(seed * 78.2330) * 28461.7193);
     let h3 = fract(sin(seed * 41.6351) * 61539.1847);
 
-    let size_rate = mix(1.55, 0.88, clamp(flex * 3.5, 0.0, 1.0));
-    let freq1 = (1.55 + h1 * 1.15) * size_rate;
-    let freq2 = freq1 * 1.618034 + h2 * 0.65;
-    let freq3 = 0.52 + h3 * 0.58;
-
+    // 1. Coherent Whole-Plant Cantilever Sway in the General Prevailing Wind Direction
+    //    (Uses ONLY per-plant seed and time_s — zero per-vertex phase distortion so stiff stems/stalks/plumes never zig-zag!)
+    let freq1 = 1.10 + h1 * 0.65;
+    let freq2 = freq1 * 1.618034 + h2 * 0.35; // Golden-ratio harmonic avoids periodic loops
     let ph1 = h1 * 6.2831853;
     let ph2 = h2 * 6.2831853;
-    let ph3 = h3 * 6.2831853;
 
-    let wind_wave = dot(world_pos.xz, vec2<f32>(0.085, 0.065));
-    let branch_phase = dot(world_pos, vec3<f32>(1.55, 1.95, 1.65));
-    let gust = 0.82 + 0.18 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
+    // General prevailing wind direction (~32 deg) with small +/- 0.18 rad per-plant spread
+    let wind_ang = 0.56 + (h3 - 0.5) * 0.36;
+    let wind_dir = vec2<f32>(cos(wind_ang), sin(wind_ang));
+    let cross_dir = vec2<f32>(-wind_dir.y, wind_dir.x);
 
-    let sway_a = (0.68 * sin(time_s * freq1 + ph1 + wind_wave)
-                + 0.28 * sin(time_s * freq2 + ph2)
-                + 0.11 * sin(time_s * (freq2 * 1.42) + branch_phase)) * gust;
-    let sway_b = (0.60 * cos(time_s * (freq1 * 0.91) + ph2 + wind_wave)
-                + 0.32 * sin(time_s * (freq2 * 1.17) + ph3 + branch_phase * 0.5)) * gust;
-    let flutter_y = 0.12 * sin(time_s * (freq2 * 1.35) + branch_phase + ph1) * flex;
+    // Whole plant leans into the general wind direction and relaxes smoothly as gusts pass
+    let main_lean = 0.32 + 0.52 * sin(time_s * freq1 + ph1) + 0.24 * sin(time_s * freq2 + ph2);
+    let cross_sway = 0.18 * cos(time_s * (freq1 * 0.87) + ph2);
+    let whole_xz = (wind_dir * main_lean + cross_dir * cross_sway) * stem_flex;
 
-    let dir_ang = 0.55 + (h3 - 0.5) * 1.25;
-    let dir_x = cos(dir_ang);
-    let dir_z = sin(dir_ang);
+    // 2. High-Frequency Leaf / Blade Turbulence (only where leaf_turb > 0 on leaves, fronds, and grass blades)
+    var turb_xyz = vec3<f32>(0.0);
+    if (leaf_turb > 0.0001) {
+        let leaf_freq = 2.85 + h2 * 1.35;
+        let leaf_phase = dot(world_pos, vec3<f32>(3.1, 2.7, 3.3)) + ph1;
+        let flutter_a = sin(time_s * leaf_freq + leaf_phase)
+                      + 0.45 * cos(time_s * (leaf_freq * 1.618) + leaf_phase * 1.3);
+        let flutter_b = cos(time_s * (leaf_freq * 1.13) + leaf_phase * 0.9);
+        let flutter_y = 0.35 * sin(time_s * (leaf_freq * 1.29) + leaf_phase * 1.1);
+        turb_xyz = vec3<f32>(
+            (wind_dir.x * flutter_a + cross_dir.x * flutter_b * 0.5) * leaf_turb,
+            flutter_y * leaf_turb,
+            (wind_dir.y * flutter_a + cross_dir.y * flutter_b * 0.5) * leaf_turb
+        );
+    }
 
-    let dx = (dir_x * sway_a - dir_z * sway_b * 0.52) * flex;
-    let dz = (dir_z * sway_a + dir_x * sway_b * 0.52) * flex;
-    let dy = flutter_y - 0.14 * (abs(dx) + abs(dz));
+    let dx = whole_xz.x + turb_xyz.x;
+    let dz = whole_xz.y + turb_xyz.z;
+    let dy = turb_xyz.y - 0.10 * (abs(whole_xz.x) + abs(whole_xz.y));
     return world_pos + vec3<f32>(dx, dy, dz);
 }
 

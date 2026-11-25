@@ -221,7 +221,7 @@ fn classify_role(id: ModelId, mat_name: &str) -> (MaterialRole, u32) {
         (MaterialRole::Shorts, 4)
     } else if n.contains("skin") {
         (MaterialRole::Skin, 4)
-    } else if n.contains("foliage") || n.contains("frond") {
+    } else if n.contains("foliage") || n.contains("frond") || n.contains("leaf") || n.contains("grass") {
         (MaterialRole::Foliage, 2)
     } else if n.contains("window") {
         (MaterialRole::WindowDark, 5)

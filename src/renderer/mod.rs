@@ -1638,58 +1638,74 @@ impl LigneClaireRenderer {
 
                             let local_y = sv.pos[1].max(0.0);
                             let r_xz = (sv.pos[0] * sv.pos[0] + sv.pos[2] * sv.pos[2]).sqrt();
-                            // Subtle wind flexibility (cut by 50% for calm, natural countryside breeze)
-                            let sway_flex = match p.model {
+                            let _ = inst_seed_f16;
+                            // Separate biomechanical wind response:
+                            // - stem_flex (uv.x): Coherent whole-plant cantilever sway in the general wind direction (depends only on height local_y)
+                            // - leaf_turb (uv.y): High-frequency leaf/blade turbulence (0 on stiff trunks, stems, and Cortaderia reed stalks/plumes; >0 on leaves/blades)
+                            let (stem_flex, leaf_turb) = match p.model {
                                 ModelId::TreeCanopy
                                 | ModelId::TreePine
                                 | ModelId::TreeEucalyptus(_)
                                 | ModelId::TreeOmbu(_)
                                 | ModelId::TreeCeibo(_) => {
-                                    let h_norm = ((local_y - 0.30).max(0.0) / 4.2).clamp(0.0, 1.45);
-                                    let leaf_boost = if mat_type == 2 {
-                                        1.15 + 0.55 * (r_xz / 1.8).clamp(0.0, 1.2)
+                                    let h_norm = ((local_y - 0.30).max(0.0) / 4.5).clamp(0.0, 1.35);
+                                    let stem = 0.075 * h_norm.powf(1.35) * scale_factor;
+                                    let leaf = if mat_type == 2 {
+                                        let out = (r_xz / 1.8).clamp(0.0, 1.2);
+                                        0.042 * h_norm * (0.35 + 0.65 * out) * scale_factor
                                     } else {
-                                        0.45
+                                        0.0
                                     };
-                                    0.12 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
+                                    (stem, leaf)
                                 }
                                 ModelId::PalmTree | ModelId::SmallPalm(_) => {
-                                    let h_norm = ((local_y - 0.12).max(0.0) / 1.8).clamp(0.0, 1.45);
-                                    let frond_out = (r_xz / 1.05).clamp(0.0, 1.4);
-                                    0.11
-                                        * (h_norm * 0.45 + frond_out * h_norm.sqrt() * 0.95)
-                                        * scale_factor
+                                    let h_norm = ((local_y - 0.12).max(0.0) / 2.0).clamp(0.0, 1.35);
+                                    let frond_out = ((r_xz - 0.18).max(0.0) / 1.15).clamp(0.0, 1.3);
+                                    let stem = 0.055 * h_norm.powf(1.35) * scale_factor;
+                                    let leaf = 0.048 * frond_out * frond_out * h_norm.sqrt() * scale_factor;
+                                    (stem, leaf)
                                 }
                                 ModelId::PampasCortadera(_) => {
-                                    let h_norm = (local_y / 1.45).clamp(0.0, 1.4);
-                                    let blade_out = (r_xz / 0.65).clamp(0.0, 1.35);
-                                    0.11
-                                        * (h_norm * h_norm * 0.85
-                                            + blade_out * (local_y / 0.28).clamp(0.0, 1.0) * 0.75)
-                                        * scale_factor
+                                    // Cortaderia selloana is structurally stiff: whole plant leans gently as a cantilever beam;
+                                    // only the flexible outer grass blades (mat_type == 2) have leaf turbulence!
+                                    let h_norm = (local_y / 1.85).clamp(0.0, 1.25);
+                                    let stem = 0.036 * h_norm.powf(1.35) * scale_factor;
+                                    let leaf = if mat_type == 2 {
+                                        let blade_out = ((r_xz - 0.14).max(0.0) / 0.65).clamp(0.0, 1.2);
+                                        0.038 * blade_out * blade_out * scale_factor
+                                    } else {
+                                        0.0
+                                    };
+                                    (stem, leaf)
                                 }
                                 ModelId::ChircaBush(_)
                                 | ModelId::CeiboBush(_)
                                 | ModelId::BushCluster => {
-                                    let h_norm = ((local_y - 0.03).max(0.0) / 0.95).clamp(0.0, 1.35);
-                                    let out_norm = (r_xz / 0.65).clamp(0.0, 1.35);
-                                    0.09 * (h_norm * (0.65 + 0.65 * out_norm)) * scale_factor
+                                    let h_norm = ((local_y - 0.03).max(0.0) / 1.10).clamp(0.0, 1.25);
+                                    let out_norm = ((r_xz - 0.12).max(0.0) / 0.70).clamp(0.0, 1.25);
+                                    let stem = 0.046 * h_norm.powf(1.35) * scale_factor;
+                                    let leaf = 0.032 * out_norm * out_norm * h_norm * scale_factor;
+                                    (stem, leaf)
                                 }
                                 ModelId::WildflowerTuft | ModelId::CampoGrass(_) => {
-                                    let h_norm = (local_y / 0.30).clamp(0.0, 1.35);
-                                    0.055 * h_norm * scale_factor
+                                    let h_norm = (local_y / 0.34).clamp(0.0, 1.25);
+                                    let out_norm = (r_xz / 0.28).clamp(0.2, 1.2);
+                                    let stem = 0.030 * h_norm.powf(1.3) * scale_factor;
+                                    let leaf = 0.022 * h_norm * out_norm * scale_factor;
+                                    (stem, leaf)
                                 }
                                 ModelId::Flagpole => {
                                     if r_xz > 0.11 && local_y > 2.5 {
-                                        0.08 * ((r_xz - 0.10) / 1.0).clamp(0.0, 1.3) * scale_factor
+                                        let cloth_out = ((r_xz - 0.10) / 1.0).clamp(0.0, 1.2);
+                                        (0.025 * cloth_out * scale_factor, 0.045 * cloth_out * cloth_out * scale_factor)
                                     } else {
-                                        0.0
+                                        (0.0, 0.0)
                                     }
                                 }
-                                _ => 0.0,
+                                _ => (0.0, 0.0),
                             };
-                            let packed_uv = if sway_flex > 0.0001 {
-                                [f32_to_f16(sway_flex), inst_seed_f16]
+                            let packed_uv = if stem_flex > 0.0001 || leaf_turb > 0.0001 {
+                                [f32_to_f16(stem_flex), f32_to_f16(leaf_turb)]
                             } else {
                                 [0u16, 0u16]
                             };
