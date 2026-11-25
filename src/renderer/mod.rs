@@ -166,17 +166,11 @@ pub struct SkinJob {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct SectorCullUniforms {
-    pub camera_pos_max_dist: [f32; 4],
-    pub cam_frustum_planes: [[f32; 4]; 6],
-    pub csm0_frustum_planes: [[f32; 4]; 6],
-    pub csm1_frustum_planes: [[f32; 4]; 6],
-    pub csm2_frustum_planes: [[f32; 4]; 6],
-    pub csm_min_caster_r: [f32; 4],
-    pub csm_max_caster_r: [f32; 4],
-    pub cam_sector_mask: [u32; 4],
-    pub shadow_sector_mask: [u32; 4],
-    pub cmd_info: [u32; 4], // [command_count, pass_stride, 0, 0]
+pub struct SinglePassCullUniforms {
+    pub frustum_planes: [[f32; 4]; 6],
+    pub filter_params: [f32; 4], // color pass: [cam.x, cam.y, cam.z, max_draw_dist]; shadow pass: [min_caster_r, max_caster_r, shadows_enabled, 0.0]
+    pub sector_mask: [u32; 4],
+    pub cmd_info: [u32; 4],      // [command_count, is_shadow_pass (0 = color view, 1 = CSM cascade), 0, 0]
 }
 
 #[repr(C)]
@@ -277,12 +271,17 @@ pub struct LigneClaireRenderer {
     skin_bg: wgpu::BindGroup,
     skin_pipeline: wgpu::ComputePipeline,
 
-    // Sector Queue & GPU Indirect Command Generation resources
-    cull_uniform_buf: wgpu::Buffer,
+    // Sector Queue & Multi-Dispatch GPU Indirect Command Generation resources
+    // (1 dispatch + indirect draw arg buffer for Color View, 1 dispatch + indirect draw arg buffer per CSM Cascade)
+    cam_cull_uniform_buf: wgpu::Buffer,
+    csm_cull_uniform_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
     draw_desc_buf: wgpu::Buffer,
-    indirect_buf: wgpu::Buffer,
+    cam_indirect_buf: wgpu::Buffer,
+    csm_indirect_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
     cull_bgl: wgpu::BindGroupLayout,
-    cull_bg: wgpu::BindGroup,
+    cam_cull_bg: wgpu::BindGroup,
+    csm_cull_bgs: [wgpu::Buffer; 0], // placeholder alignment
+    csm_cull_bind_groups: [wgpu::BindGroup; NUM_SHADOW_CASCADES],
     cull_pipeline: wgpu::ComputePipeline,
 
     frame_buf: wgpu::Buffer,
@@ -293,30 +292,31 @@ pub struct LigneClaireRenderer {
     obj_staging: Vec<u8>,
 
     shadow_tex: wgpu::Texture,
-    #[allow(dead_code)]
     shadow_array_view: wgpu::TextureView,
     shadow_cascade_views: [wgpu::TextureView; NUM_SHADOW_CASCADES],
-    #[allow(dead_code)]
     shadow_sampler: wgpu::Sampler,
     gbuf_sampler: wgpu::Sampler,
     taa_linear_sampler: wgpu::Sampler,
     taa_buf: wgpu::Buffer,
 
     frame_bgl: wgpu::BindGroupLayout,
-    scene_frame_bgl: wgpu::BindGroupLayout,
     post_bgl: wgpu::BindGroupLayout,
     taa_bgl: wgpu::BindGroupLayout,
     obj_bgl: wgpu::BindGroupLayout,
 
     frame_bg: wgpu::BindGroup,
     shadow_frame_bgs: [wgpu::BindGroup; NUM_SHADOW_CASCADES],
-    scene_frame_bg: wgpu::BindGroup,
     obj_bg: wgpu::BindGroup,
 
     shadow_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
-    scene_pipeline: wgpu::RenderPipeline,
-    water_pipeline: wgpu::RenderPipeline,
+    gbuf_road_tarmac_pipeline: wgpu::RenderPipeline,
+    gbuf_road_gravel_pipeline: wgpu::RenderPipeline,
+    gbuf_terrain_natural_pipeline: wgpu::RenderPipeline,
+    gbuf_terrain_coastal_pipeline: wgpu::RenderPipeline,
+    gbuf_prop_pipeline: wgpu::RenderPipeline,
+    gbuf_skinned_pipeline: wgpu::RenderPipeline,
+    gbuf_water_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     taa_pipeline: wgpu::RenderPipeline,
 
@@ -501,12 +501,25 @@ impl LigneClaireRenderer {
             cache: None,
         });
 
-        // Sector Queue & GPU Indirect Command Generation compute pipeline
-        let cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cull_uniform_buf"),
-            size: std::mem::size_of::<SectorCullUniforms>() as u64,
+        // Sector Queue & Multi-Dispatch GPU Indirect Command Generation compute pipeline
+        // Separate uniform buffers and separate indirect draw argument buffers for Color View and each CSM Cascade
+        let single_cull_u_size = std::mem::size_of::<SinglePassCullUniforms>() as u64;
+        let single_indirect_buf_size =
+            (std::mem::size_of::<DrawIndexedIndirectCmd>() * MAX_INDIRECT_COMMANDS) as u64;
+
+        let cam_cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cam_cull_uniform_buf"),
+            size: single_cull_u_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let csm_cull_uniform_bufs = std::array::from_fn(|ci| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("csm_cull_uniform_buf_c{ci}")),
+                size: single_cull_u_size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
         let draw_desc_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("draw_desc_buf"),
@@ -514,15 +527,23 @@ impl LigneClaireRenderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        // 4 passes of indirect draw commands: [0: Scene G-Buffer, 1: CSM C0, 2: CSM C1, 3: CSM C2]
-        let indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("indirect_draw_buf"),
-            size: (std::mem::size_of::<DrawIndexedIndirectCmd>() * MAX_INDIRECT_COMMANDS * 4)
-                as u64,
+        let cam_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cam_indirect_draw_buf"),
+            size: single_indirect_buf_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let csm_indirect_bufs = std::array::from_fn(|ci| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("csm_indirect_draw_buf_c{ci}")),
+                size: single_indirect_buf_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cull_bgl"),
@@ -533,9 +554,7 @@ impl LigneClaireRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(
-                            std::mem::size_of::<SectorCullUniforms>() as u64,
-                        ),
+                        min_binding_size: NonZeroU64::new(single_cull_u_size),
                     },
                     count: None,
                 },
@@ -565,23 +584,33 @@ impl LigneClaireRenderer {
                 },
             ],
         });
-        let cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cull_bg"),
-            layout: &cull_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: cull_uniform_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: draw_desc_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: indirect_buf.as_entire_binding(),
-                },
-            ],
+        let make_cull_bg = |label: &str, u_buf: &wgpu::Buffer, ind_buf: &wgpu::Buffer| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &cull_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: u_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: draw_desc_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ind_buf.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let cam_cull_bg = make_cull_bg("cam_cull_bg", &cam_cull_uniform_buf, &cam_indirect_buf);
+        let csm_cull_bind_groups = std::array::from_fn(|ci| {
+            make_cull_bg(
+                &format!("csm_cull_bg_c{ci}"),
+                &csm_cull_uniform_bufs[ci],
+                &csm_indirect_bufs[ci],
+            )
         });
         let cull_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cull_indirect_shader"),
@@ -703,41 +732,8 @@ impl LigneClaireRenderer {
             }],
         });
 
-        let scene_frame_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("scene_frame_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(
-                            std::mem::size_of::<FrameUniforms>() as u64
-                        ),
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
-                    count: None,
-                },
-            ],
-        });
-
-        // 2-Target MRT G-Buffer + single hardware Depth32Float buffer (no redundant depth_meta_tex!)
+        // Deferred Lighting & Ligne Claire Outline Pass bind group layout:
+        // Binds FrameUniforms, unlit G-Buffer Albedo+OutlineWeight, G-Buffer Normal+ID, Hardware Depth32Float, and 3-Cascade CSM Shadow Map!
         let post_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post_bgl"),
             entries: &[
@@ -787,6 +783,22 @@ impl LigneClaireRenderer {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
             ],
@@ -889,60 +901,54 @@ impl LigneClaireRenderer {
             })
         });
 
-        let scene_frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scene_frame_bg"),
-            layout: &scene_frame_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&shadow_array_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
-                },
-            ],
-        });
-
         let obj_bg = Self::make_obj_bg(device, &obj_bgl, &obj_buf);
 
-        let shadow_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shadow_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
-        });
+        let common_wgsl = include_str!("../shaders/common.wgsl");
+        let make_shader_with_common = |label: &str, domain_src: &str| {
+            let full_src = format!("{common_wgsl}\n{domain_src}");
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(full_src.into()),
+            })
+        };
+
+        let shadow_mod =
+            make_shader_with_common("shadow_shader", include_str!("../shaders/shadow.wgsl"));
         let sky_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sky_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sky.wgsl").into()),
         });
-        let scene_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("scene_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/scene.wgsl").into()),
-        });
-        let water_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("water_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water.wgsl").into()),
-        });
-        let post_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("post_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post.wgsl").into()),
-        });
+        let gbuf_road_mod =
+            make_shader_with_common("gbuf_road_shader", include_str!("../shaders/gbuf_road.wgsl"));
+        let gbuf_terrain_mod = make_shader_with_common(
+            "gbuf_terrain_shader",
+            include_str!("../shaders/gbuf_terrain.wgsl"),
+        );
+        let gbuf_prop_mod =
+            make_shader_with_common("gbuf_prop_shader", include_str!("../shaders/gbuf_prop.wgsl"));
+        let gbuf_skinned_mod = make_shader_with_common(
+            "gbuf_skinned_shader",
+            include_str!("../shaders/gbuf_skinned.wgsl"),
+        );
+        let gbuf_water_mod = make_shader_with_common(
+            "gbuf_water_shader",
+            include_str!("../shaders/gbuf_water.wgsl"),
+        );
+        let post_mod =
+            make_shader_with_common("post_lighting_shader", include_str!("../shaders/post.wgsl"));
         let taa_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("taa_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
         });
 
-        let shadow_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shadow_pl"),
+        let gbuf_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gbuf_pl"),
             bind_group_layouts: &[Some(&frame_bgl), Some(&obj_bgl)],
             immediate_size: 0,
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow_pipeline"),
-            layout: Some(&shadow_pl),
+            layout: Some(&gbuf_pl),
             vertex: wgpu::VertexState {
                 module: &shadow_mod,
                 entry_point: Some("vs_shadow"),
@@ -1017,79 +1023,83 @@ impl LigneClaireRenderer {
             cache: None,
         });
 
-        let scene_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("scene_pl"),
-            bind_group_layouts: &[Some(&scene_frame_bgl), Some(&obj_bgl)],
-            immediate_size: 0,
-        });
-        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("scene_pipeline"),
-            layout: Some(&scene_pl),
-            vertex: wgpu::VertexState {
-                module: &scene_mod,
-                entry_point: Some("vs_scene"),
-                compilation_options: Default::default(),
-                buffers: &[Some(SceneVertex::desc())],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &scene_mod,
-                entry_point: Some("fs_scene"),
-                compilation_options: Default::default(),
-                targets: &gbuf_targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make_gbuf_domain_pipeline =
+            |label: &str, module: &wgpu::ShaderModule, vs_entry: &str, fs_entry: &str| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&gbuf_pl),
+                    vertex: wgpu::VertexState {
+                        module,
+                        entry_point: Some(vs_entry),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(SceneVertex::desc())],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module,
+                        entry_point: Some(fs_entry),
+                        compilation_options: Default::default(),
+                        targets: &gbuf_targets,
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
 
-        let water_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("water_pl"),
-            bind_group_layouts: &[Some(&frame_bgl), Some(&obj_bgl)],
-            immediate_size: 0,
-        });
-        let water_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("water_pipeline"),
-            layout: Some(&water_pl),
-            vertex: wgpu::VertexState {
-                module: &water_mod,
-                entry_point: Some("vs_water"),
-                compilation_options: Default::default(),
-                buffers: &[Some(SceneVertex::desc())],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &water_mod,
-                entry_point: Some("fs_water"),
-                compilation_options: Default::default(),
-                targets: &gbuf_targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let gbuf_road_tarmac_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_road_tarmac_pipeline",
+            &gbuf_road_mod,
+            "vs_gbuf_road",
+            "fs_gbuf_road_tarmac",
+        );
+        let gbuf_road_gravel_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_road_gravel_pipeline",
+            &gbuf_road_mod,
+            "vs_gbuf_road",
+            "fs_gbuf_road_gravel",
+        );
+        let gbuf_terrain_natural_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_terrain_natural_pipeline",
+            &gbuf_terrain_mod,
+            "vs_gbuf_terrain",
+            "fs_gbuf_terrain_natural",
+        );
+        let gbuf_terrain_coastal_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_terrain_coastal_pipeline",
+            &gbuf_terrain_mod,
+            "vs_gbuf_terrain",
+            "fs_gbuf_terrain_coastal",
+        );
+        let gbuf_prop_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_prop_pipeline",
+            &gbuf_prop_mod,
+            "vs_gbuf_prop",
+            "fs_gbuf_prop",
+        );
+        let gbuf_skinned_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_skinned_pipeline",
+            &gbuf_skinned_mod,
+            "vs_gbuf_skinned",
+            "fs_gbuf_skinned",
+        );
+        let gbuf_water_pipeline = make_gbuf_domain_pipeline(
+            "gbuf_water_pipeline",
+            &gbuf_water_mod,
+            "vs_gbuf_water",
+            "fs_gbuf_water",
+        );
 
         let post_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post_pl"),
@@ -1170,6 +1180,8 @@ impl LigneClaireRenderer {
             &taa_buf,
             &gbuf_sampler,
             &taa_linear_sampler,
+            &shadow_array_view,
+            &shadow_sampler,
         );
         let egui_renderer = egui_wgpu::Renderer::new(
             device,
@@ -1199,11 +1211,15 @@ impl LigneClaireRenderer {
             skin_bgl,
             skin_bg,
             skin_pipeline,
-            cull_uniform_buf,
+            cam_cull_uniform_buf,
+            csm_cull_uniform_bufs,
             draw_desc_buf,
-            indirect_buf,
+            cam_indirect_buf,
+            csm_indirect_bufs,
             cull_bgl,
-            cull_bg,
+            cam_cull_bg,
+            csm_cull_bgs: [],
+            csm_cull_bind_groups,
             cull_pipeline,
             frame_buf,
             shadow_frame_bufs,
@@ -1219,18 +1235,21 @@ impl LigneClaireRenderer {
             taa_linear_sampler,
             taa_buf,
             frame_bgl,
-            scene_frame_bgl,
             post_bgl,
             taa_bgl,
             obj_bgl,
             frame_bg,
             shadow_frame_bgs,
-            scene_frame_bg,
             obj_bg,
             shadow_pipeline,
             sky_pipeline,
-            scene_pipeline,
-            water_pipeline,
+            gbuf_road_tarmac_pipeline,
+            gbuf_road_gravel_pipeline,
+            gbuf_terrain_natural_pipeline,
+            gbuf_terrain_coastal_pipeline,
+            gbuf_prop_pipeline,
+            gbuf_skinned_pipeline,
+            gbuf_water_pipeline,
             post_pipeline,
             taa_pipeline,
             taa_frame_index: 0,
@@ -1303,6 +1322,8 @@ impl LigneClaireRenderer {
         taa_buf: &wgpu::Buffer,
         gbuf_sampler: &wgpu::Sampler,
         taa_linear_sampler: &wgpu::Sampler,
+        shadow_array_view: &wgpu::TextureView,
+        shadow_sampler: &wgpu::Sampler,
     ) -> GBufferTargets {
         let mk_tex = |label: &str, fmt: wgpu::TextureFormat| {
             device.create_texture(&wgpu::TextureDescriptor {
@@ -1320,7 +1341,7 @@ impl LigneClaireRenderer {
                 view_formats: &[],
             })
         };
-        let lit_tex = mk_tex("gbuf_lit", wgpu::TextureFormat::Rgba8Unorm);
+        let lit_tex = mk_tex("gbuf_albedo", wgpu::TextureFormat::Rgba8Unorm);
         let normal_tex = mk_tex("gbuf_norm", wgpu::TextureFormat::Rgba8Unorm);
         let scene_depth_tex = mk_tex("gbuf_z", wgpu::TextureFormat::Depth32Float);
         let post_color_tex = mk_tex("post_color", wgpu::TextureFormat::Rgba8Unorm);
@@ -1339,7 +1360,7 @@ impl LigneClaireRenderer {
         ];
 
         let post_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("post_bg"),
+            label: Some("post_lighting_bg"),
             layout: post_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1361,6 +1382,14 @@ impl LigneClaireRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&scene_depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(shadow_array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
                 },
             ],
         });
@@ -1432,6 +1461,8 @@ impl LigneClaireRenderer {
                 &self.taa_buf,
                 &self.gbuf_sampler,
                 &self.taa_linear_sampler,
+                &self.shadow_array_view,
+                &self.shadow_sampler,
             );
             self.taa_history_valid = false;
         }
@@ -1929,7 +1960,7 @@ impl LigneClaireRenderer {
             (unjittered_proj_mat, [0.0, 0.0])
         };
         let view_proj = proj_mat * view_mat;
-        let inv_view_proj = unjittered_inv_view_proj;
+        let inv_view_proj = view_proj.inverse();
 
         let camera_cut = !self.taa_history_valid
             || self.last_camera_mode != Some(camera_mode)
@@ -2311,29 +2342,6 @@ impl LigneClaireRenderer {
         }
 
         let cmd_count = (static_cmd_base + rider_draw_descs.len()) as u32;
-        let cull_u = SectorCullUniforms {
-            camera_pos_max_dist: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
-            cam_frustum_planes: cam_frustum.planes,
-            csm0_frustum_planes: csm_frustums[0].planes,
-            csm1_frustum_planes: csm_frustums[1].planes,
-            csm2_frustum_planes: csm_frustums[2].planes,
-            csm_min_caster_r: [
-                csm_min_caster_r[0],
-                csm_min_caster_r[1],
-                csm_min_caster_r[2],
-                if graphics.shadows_enabled { 1.0 } else { 0.0 },
-            ],
-            csm_max_caster_r: [csm_max_caster_r[0], csm_max_caster_r[1], csm_max_caster_r[2], 0.0],
-            cam_sector_mask,
-            shadow_sector_mask,
-            cmd_info: [
-                cmd_count,
-                MAX_INDIRECT_COMMANDS as u32,
-                0,
-                0,
-            ],
-        };
-        queue.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&cull_u));
         if !rider_draw_descs.is_empty() {
             let rider_byte_offset =
                 (static_cmd_base * std::mem::size_of::<GpuDrawDesc>()) as u64;
@@ -2341,6 +2349,35 @@ impl LigneClaireRenderer {
                 &self.draw_desc_buf,
                 rider_byte_offset,
                 bytemuck::cast_slice(&rider_draw_descs),
+            );
+        }
+
+        // Upload per-pass culling uniforms: 1 for Color View + 1 for each CSM Shadow Cascade
+        let cam_cull_u = SinglePassCullUniforms {
+            frustum_planes: cam_frustum.planes,
+            filter_params: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
+            sector_mask: cam_sector_mask,
+            cmd_info: [cmd_count, 0, 0, 0],
+        };
+        queue.write_buffer(&self.cam_cull_uniform_buf, 0, bytemuck::bytes_of(&cam_cull_u));
+
+        let shadows_flag = if graphics.shadows_enabled { 1.0_f32 } else { 0.0_f32 };
+        for ci in 0..NUM_SHADOW_CASCADES {
+            let csm_cull_u = SinglePassCullUniforms {
+                frustum_planes: csm_frustums[ci].planes,
+                filter_params: [
+                    csm_min_caster_r[ci],
+                    csm_max_caster_r[ci],
+                    shadows_flag,
+                    0.0,
+                ],
+                sector_mask: csm_sector_masks[ci],
+                cmd_info: [cmd_count, 1, 0, 0],
+            };
+            queue.write_buffer(
+                &self.csm_cull_uniform_bufs[ci],
+                0,
+                bytemuck::bytes_of(&csm_cull_u),
             );
         }
 
@@ -2366,23 +2403,31 @@ impl LigneClaireRenderer {
         }
 
         // -----------------------------------------------------------------
-        // Pass 0b: GPU Sector Culling & Indirect Command Generation Pass (cull_indirect.wgsl)
+        // Pass 0b: Multi-Dispatch GPU Culling & Indirect Command Generation (cull_indirect.wgsl)
+        //          - Dispatch 0: Color G-Buffer View -> cam_indirect_buf
+        //          - Dispatches 1..=3: CSM Cascades C0, C1, C2 -> csm_indirect_bufs[0..3]
         // -----------------------------------------------------------------
         if cmd_count > 0 {
+            let workgroups = cmd_count.div_ceil(64);
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("cull_indirect_compute_pass"),
+                label: Some("cull_indirect_multi_dispatch_pass"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.cull_pipeline);
-            cpass.set_bind_group(0, &self.cull_bg, &[]);
-            cpass.dispatch_workgroups(cmd_count.div_ceil(64), 1, 1);
+            // Color G-Buffer View Culling Dispatch
+            cpass.set_bind_group(0, &self.cam_cull_bg, &[]);
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+            // Separate Culling Dispatch per CSM Cascade
+            for ci in 0..NUM_SHADOW_CASCADES {
+                cpass.set_bind_group(0, &self.csm_cull_bind_groups[ci], &[]);
+                cpass.dispatch_workgroups(workgroups, 1, 1);
+            }
         }
 
         let indirect_cmd_size = std::mem::size_of::<DrawIndexedIndirectCmd>() as u64;
-        let pass_stride_bytes = (MAX_INDIRECT_COMMANDS as u64) * indirect_cmd_size;
 
         // -----------------------------------------------------------------
-        // Passes 1..3: 3-Cascade Directional Shadow Maps via GPU Indirect Commands
+        // Passes 1..3: 3-Cascade Directional Shadow Maps via Dedicated Per-Cascade Indirect Buffers
         // -----------------------------------------------------------------
         for ci in 0..NUM_SHADOW_CASCADES {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2404,7 +2449,7 @@ impl LigneClaireRenderer {
             rpass.set_bind_group(0, &self.shadow_frame_bgs[ci], &[]);
             rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
             rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
-            let cascade_base_bytes = ((ci as u64) + 1) * pass_stride_bytes;
+            let csm_ind_buf = &self.csm_indirect_bufs[ci];
             if graphics.shadows_enabled {
                 let mut last_off: Option<u32> = None;
                 let csm_mask = &csm_sector_masks[ci];
@@ -2419,9 +2464,8 @@ impl LigneClaireRenderer {
                             rpass.set_bind_group(1, &self.obj_bg, &[off]);
                             last_off = Some(off);
                         }
-                        let indirect_offset =
-                            cascade_base_bytes + (cmd.cmd_slot as u64) * indirect_cmd_size;
-                        rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                        let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
+                        rpass.draw_indexed_indirect(csm_ind_buf, indirect_offset);
                     }
                 }
                 for cmd in &rider_cmds {
@@ -2430,16 +2474,15 @@ impl LigneClaireRenderer {
                             rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
                             last_off = Some(cmd.offset_bytes);
                         }
-                        let indirect_offset =
-                            cascade_base_bytes + (cmd.cmd_slot as u64) * indirect_cmd_size;
-                        rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                        let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
+                        rpass.draw_indexed_indirect(csm_ind_buf, indirect_offset);
                     }
                 }
             }
         }
 
         // -----------------------------------------------------------------
-        // Pass 4: Sky -> Indirect Sector Scene -> Water into 2-Target MRT G-Buffer + Single Depth32Float
+        // Pass 4: Pure Unlit G-Buffer Pass (Domain-Permuted Shaders + Opaque Water)
         // -----------------------------------------------------------------
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2482,39 +2525,66 @@ impl LigneClaireRenderer {
             rpass.set_bind_group(0, &self.frame_bg, &[]);
             rpass.draw(0..3, 0..1);
 
-            // 4b. Scene geometry via GPU Indirect Draw Commands for active enqueued sectors
-            rpass.set_pipeline(&self.scene_pipeline);
-            rpass.set_bind_group(0, &self.scene_frame_bg, &[]);
+            // 4b. Static sector geometry via Domain-Specific G-Buffer Pipelines & cam_indirect_buf
+            let road_pipe = if biome == BiomeId::RollingRuralGravel {
+                &self.gbuf_road_gravel_pipeline
+            } else {
+                &self.gbuf_road_tarmac_pipeline
+            };
+            let terrain_pipe = if biome == BiomeId::CoastalPromenade {
+                &self.gbuf_terrain_coastal_pipeline
+            } else {
+                &self.gbuf_terrain_natural_pipeline
+            };
+
+            rpass.set_bind_group(0, &self.frame_bg, &[]);
             rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
             rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
             let mut last_off: Option<u32> = None;
+            let mut last_domain: Option<usize> = None;
             for cmd in &self.static_sector_cmds {
                 if is_sector_bit(&cam_sector_mask, cmd.sector_id) {
+                    let domain = match cmd.uniform_idx {
+                        0 => 0, // Road domain
+                        1 => 1, // Terrain domain
+                        _ => 2, // Prop/Wire/Foliage domain
+                    };
+                    if last_domain != Some(domain) {
+                        match domain {
+                            0 => rpass.set_pipeline(road_pipe),
+                            1 => rpass.set_pipeline(terrain_pipe),
+                            _ => rpass.set_pipeline(&self.gbuf_prop_pipeline),
+                        }
+                        last_domain = Some(domain);
+                    }
                     let off = static_uniform_offsets[cmd.uniform_idx];
                     if last_off != Some(off) {
                         rpass.set_bind_group(1, &self.obj_bg, &[off]);
                         last_off = Some(off);
                     }
                     let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                    rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
+                    rpass.draw_indexed_indirect(&self.cam_indirect_buf, indirect_offset);
                 }
-            }
-            for cmd in &rider_cmds {
-                if last_off != Some(cmd.offset_bytes) {
-                    rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
-                    last_off = Some(cmd.offset_bytes);
-                }
-                let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                rpass.draw_indexed_indirect(&self.indirect_buf, indirect_offset);
             }
 
-            // 4c. Water pass
+            // 4c. Dynamic Riders & Compute-Skinned Quadruped Animals via Dedicated Skinned G-Buffer Pipeline
+            if !rider_cmds.is_empty() {
+                rpass.set_pipeline(&self.gbuf_skinned_pipeline);
+                for cmd in &rider_cmds {
+                    if last_off != Some(cmd.offset_bytes) {
+                        rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
+                        last_off = Some(cmd.offset_bytes);
+                    }
+                    let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
+                    rpass.draw_indexed_indirect(&self.cam_indirect_buf, indirect_offset);
+                }
+            }
+
+            // 4d. Opaque Water rendered directly into the G-Buffer (lit in the deferred lighting pass)
             if let Some(w_off) = water_off {
-                rpass.set_pipeline(&self.water_pipeline);
+                rpass.set_pipeline(&self.gbuf_water_pipeline);
                 rpass.set_bind_group(0, &self.frame_bg, &[]);
                 rpass.set_bind_group(1, &self.obj_bg, &[w_off]);
-                rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
-                rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
                 rpass.draw_indexed(
                     self.world_offsets.water_first_index
                         ..(self.world_offsets.water_first_index
@@ -2640,8 +2710,8 @@ impl LigneClaireRenderer {
             &self.gbuf.post_color_tex,
             &self.gbuf.taa_history_tex,
             &self.frame_bgl,
-            &self.scene_frame_bgl,
             &self.cull_bgl,
+            &self.csm_cull_bgs,
         );
     }
 }

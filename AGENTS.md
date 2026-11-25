@@ -85,31 +85,32 @@ Every 3D mesh vertex is strictly **24 bytes** (`#[repr(C)]`):
 1. **CPU Top-Down 3D Octree Frustum Culling (`WorldOctree::query_frustum`):**
    - Each frame, the CPU extracts 6 Gribb-Hartmann frustum planes (`Frustum::from_view_proj`) for the unjittered camera view-projection matrix and the 3 CSM orthographic light matrices.
    - The CPU traverses `geo.octree.query_frustum` top-down, setting visible leaf sector bits in 128-bit bitmasks (`cam_sector_mask`, `shadow_sector_mask`, and per-cascade `csm_sector_masks`). Bit `127` is reserved for dynamic cyclists.
-2. **GPU Per-Draw-Call 6-Plane Frustum & CSM Size Culling (`src/shaders/cull_indirect.wgsl`, Pass 0b):**
-   - Evaluates every static sector draw descriptor and dynamic rider draw descriptor in parallel on the GPU:
-     - Checks the sector bit in `cam_sector_mask` / `shadow_sector_mask`.
-     - Tests the draw call's world bounding sphere (`pos_radius`) against the 6 camera frustum planes (`frustum_contains_sphere`) and `max_prop_draw_distance_m`.
-     - Tests the draw call's caster radius (`caster_r`, unpacked from `flags >> 16` for baked prop tiers) against `csm_min_caster_r` / `csm_max_caster_r` and each cascade's 6 orthographic frustum planes.
-   - Writes `DrawIndexedIndirectCmd` (`instance_count = 0` or `1`) for all 4 passes (G-Buffer Scene + 3 CSM Shadow Cascades).
+2. **Multi-Dispatch GPU Per-Draw-Call 6-Plane Frustum & CSM Size Culling (`src/shaders/cull_indirect.wgsl`, Pass 0b):**
+   - Culling runs in **4 separate compute dispatches** using **4 separate indirect draw argument buffers** (`cam_indirect_buf` for the color G-Buffer view and `csm_indirect_bufs[0..3]` for each CSM shadow cascade) and dedicated `SinglePassCullUniforms` buffers:
+     - **Dispatch 0 (Color View):** Checks the sector bit in `cam_sector_mask`, tests the draw call's world bounding sphere (`pos_radius`) against the 6 camera frustum planes and `max_prop_draw_distance_m`, and writes `DrawIndexedIndirectCmd` into `cam_indirect_buf`.
+     - **Dispatches 1..=3 (CSM Cascades C0, C1, C2):** Each cascade dispatch checks its per-cascade `csm_sector_masks[ci]`, filters the draw call's caster radius (`caster_r`) against `[csm_min_caster_r[ci], csm_max_caster_r[ci]]`, tests the 6 orthographic cascade frustum planes, and writes `DrawIndexedIndirectCmd` into `csm_indirect_bufs[ci]`.
 
 ### 4.4 Pre-Render Compute Skinning (`src/shaders/skinning.wgsl`, Pass 0a)
 - **No inline skinning in vertex shaders.**
-- Articulated cyclist meshes are deformed in `skinning.wgsl` prior to rendering, reading unskinned template vertices from `skin_src_vb` and writing world-ready skinned vertices into the dynamic tail of `mega_vb` (`skinned_base_vertex..`).
-- `shadow.wgsl` and `scene.wgsl` consume the pre-skinned vertices directly as rigid geometry.
+- Articulated cyclist and quadruped animal meshes are deformed in `skinning.wgsl` prior to rendering, reading unskinned template vertices from `skin_src_vb` and writing world-ready skinned vertices into the dynamic tail of `mega_vb` (`skinned_base_vertex..`).
+- `shadow.wgsl` and `gbuf_skinned.wgsl` consume the pre-skinned vertices directly as rigid geometry.
 
-### 4.5 3-Cascade Directional Shadow Maps (`src/shaders/shadow.wgsl` & `src/shaders/scene.wgsl`, Passes 1..3)
-- **Texture Format:** `2048×2048×3` `Depth32Float` `D2Array` (`NUM_SHADOW_CASCADES = 3`).
-- **Cascade Radii & Splits:** Orthographic radii `[12.0 m, 42.0 m, 128.0 m]`, view-depth splits `[18.0 m, 68.0 m, 215.0 m]`, caster radius filters `min = [0.0 m, 0.90 m, 2.50 m]`, `max = [28.0 m, 45.0 m, 90.0 m]`.
-- **Peter Panning Prevention & Fast Sampling:** Hardware depth bias is kept minimal (`constant: 1, slope_scale: 0.35`) paired with slope-scaled receiver normal offset in `sample_csm_shadow`. `sample_csm_shadow` early-outs immediately when `view_depth >= cascade_splits.z`, transforms light-space coordinates lazily per cascade, and uses 9-tap PCF on Cascade 0, 4-tap PCF on Cascade 1, and 1-tap hardware bilinear comparison on Cascade 2.
+### 4.5 Shared Shader Common Library (`src/shaders/common.wgsl`) & Domain-Permuted Unlit G-Buffer Pass (`Pass 4`)
+- **No monolithic G-Buffer uber-shader or material `if/else` chains.**
+- Shared structs (`FrameUniforms`, `ObjectUniforms`, `VertexInput`, `GBufferVertOut`, `GBufferOut`), octahedral normal encoding/decoding (`oct_encode`, `oct_decode`), procedural noise (`hash21`, `value_noise`), and non-periodic vegetation wind sway (`apply_vegetation_sway`) live in `src/shaders/common.wgsl` and are prepended at shader module creation time.
+- **No lighting or shadow sampling in the G-Buffer pass.** Each material domain has its own dedicated G-Buffer shader and `wgpu::RenderPipeline` outputting only **unlit surface albedo + `outline_weight`** to `@location(0) albedo_tex` (`Rgba8Unorm`), **octahedral view normal + `crease_sensitivity` + `object_id / 255.0`** to `@location(1) normal_tex` (`Rgba8Unorm`), and hardware depth to `scene_depth_tex` (`Depth32Float`):
+  - `src/shaders/gbuf_road.wgsl` (`gbuf_road_tarmac_pipeline` & `gbuf_road_gravel_pipeline`)
+  - `src/shaders/gbuf_terrain.wgsl` (`gbuf_terrain_natural_pipeline` & `gbuf_terrain_coastal_pipeline`)
+  - `src/shaders/gbuf_prop.wgsl` (`gbuf_prop_pipeline`: static props, rocks, architecture, and wind-swaying foliage)
+  - `src/shaders/gbuf_skinned.wgsl` (`gbuf_skinned_pipeline`: dynamic cyclists and compute-skinned animals with zero procedural noise calls)
+  - `src/shaders/gbuf_water.wgsl` (`gbuf_water_pipeline`: opaque water rendered directly into the G-Buffer with `object_id = 4`)
 
-### 4.6 2-Target MRT G-Buffer & Single Hardware Depth Buffer (`Pass 4`)
-- **Never allocate a second depth buffer.** The G-Buffer uses only:
-  - `@location(0) lit_tex` (`Rgba8Unorm`): `rgb` = cel-shaded lit color + fog, `a` = `outline_weight`.
-  - `@location(1) normal_tex` (`Rgba8Unorm`): `rg` = octahedral view normal, `b` = `crease_sensitivity`, `a` = `object_id / 255.0`.
-  - `scene_depth_tex` (`Depth32Float`): Single hardware depth buffer, linearized on demand in `post.wgsl` via `load_linear_depth`.
-
-### 4.7 Ligne Claire Outline Pass (`src/shaders/post.wgsl`, Pass 5) & TAA Pass (`src/shaders/taa.wgsl`, Pass 5b)
-- **Pass 5 (`post.wgsl`):** Reads `lit_tex`, `normal_tex`, and `scene_depth_tex`, composites the 1-pixel *Ligne Claire* ink outlines (`ink_mask`), and writes perceptual sRGB color + `ink_mask` (`.a`) into offscreen `post_color_tex` (`Rgba8Unorm`).
+### 4.6 3-Cascade Directional Shadow Maps (`src/shaders/shadow.wgsl`, Passes 1..3) & Deferred Lighting + Outline Pass (`src/shaders/post.wgsl`, Pass 5)
+- **Shadow Map Format:** `2048×2048×3` `Depth32Float` `D2Array` (`NUM_SHADOW_CASCADES = 3`), orthographic radii `[12.0 m, 42.0 m, 128.0 m]`, view-depth splits `[18.0 m, 68.0 m, 215.0 m]`, caster radius filters `min = [0.0 m, 0.90 m, 2.50 m]`, `max = [28.0 m, 45.0 m, 90.0 m]`.
+- **Pass 5 — Fullscreen Deferred Lighting & *Ligne Claire* Ink Outlines (`src/shaders/post.wgsl`):**
+  - Reconstructs 3D `world_pos` from `scene_depth_tex` (`frame.inv_view_proj`) and transforms the decoded view normal to world space (`view_to_world_normal`) so lighting and shadow sampling execute **at most once per visible screen pixel** with zero overdraw waste.
+  - Uses a single unified 4-tap hardware-bilinear comparison PCF function (`sample_shadow_cascade`) across all 3 CSM cascades.
+  - Evaluates stepped *Ligne Claire* cel-shading, Fresnel rim lighting, opaque water specular sun-path shimmer (`object_id == 4`), exponential distance fog, and 1-pixel forward-difference ink outlines (`ink_mask`), writing perceptual sRGB color + `ink_mask` (`.a`) into `post_color_tex` for Pass 5b (`src/shaders/taa.wgsl`).
 - **Pass 5b (`taa.wgsl`):**
   - Applies 8-sample Halton(2, 3) sub-pixel projection jitter (`halton_2_3_jitter_px`), 3×3 closest-depth velocity dilation, unjittered world-space reprojection (`c_uv - jitter_uv`), 5-tap Filmic Catmull-Rom history sampling, and YCoCg variance clipping ($\mu \pm \gamma \sigma$, tightened on dynamic rider object IDs `>= 180` and fast motion).
   - Applies Karis luminance-weighted temporal blending and contrast-adaptive sharpening (boosted along `ink_mask` edges), writing the clean resolved sRGB color to `@location(1)` (`taa_history_tex[curr_idx]`) and the paper-grained display color to `@location(0)` (`target_view`).
