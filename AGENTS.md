@@ -21,6 +21,7 @@ All AI coding agents and contributors must follow these rules whenever modifying
    - All 3D models (vegetation, trees, palms, bushes, rocks, animals, buildings, vehicles, avatars, props) **MUST** be created and exported as `.glb` files into `assets/models/` using the **Blender MCP** (`execute_blender_code` / `blender` MCP tools) and loaded via `load_glb` in `src/assets.rs`.
    - **NEVER** write procedural mesh-building code in Rust to generate 3D prop, vegetation, rock, or animal models.
    - When adding species/prop variations (e.g., 10 variants of a tree, bush, palm, or rock species, or animals like horses, cows, sheep, mulitas), author and export the `.glb` models in Blender via the Blender MCP.
+   - **NEVER call `bpy.ops.wm.read_factory_settings()` inside `execute_blender_code`**: `read_factory_settings` unloads all active Blender addons (including the `Blender MCP` addon server itself) and drops the MCP connection. Always clear the scene by removing objects/meshes via `for o in list(bpy.data.objects): bpy.data.objects.remove(o, do_unlink=True)`.
 4. **Mandatory 4-Step Verification Before Every Commit:**
    - **Step 1 — Unit Tests:** Run `cargo test --offline` (all physics, spline, octree frustum culling, TAA Halton jitter, and BLE FTMS/CPS/CSC/HRS packet parser tests must pass with zero warnings).
    - **Step 2 — WebAssembly Target Check:** Run `cargo check --offline --target wasm32-unknown-unknown --no-default-features` to ensure platform-agnostic WebGPU/WASM compatibility.

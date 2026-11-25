@@ -492,7 +492,7 @@ impl AssetBank {
             (ModelId::PampasCortadera(7), include_bytes!("../assets/models/pampas_cortadera_7.glb")),
             (ModelId::PampasCortadera(8), include_bytes!("../assets/models/pampas_cortadera_8.glb")),
             (ModelId::PampasCortadera(9), include_bytes!("../assets/models/pampas_cortadera_9.glb")),
-            // Chirca Countryside Scrub Bush variants (10)
+            // Chirca Countryside Scrub Bush (V-shaped broom shrub) variants (10)
             (ModelId::ChircaBush(0), include_bytes!("../assets/models/chirca_bush_0.glb")),
             (ModelId::ChircaBush(1), include_bytes!("../assets/models/chirca_bush_1.glb")),
             (ModelId::ChircaBush(2), include_bytes!("../assets/models/chirca_bush_2.glb")),
