@@ -245,6 +245,8 @@ fn camera_name_localized(cam: CameraMode, lang: Language) -> &'static str {
         (CameraMode::Side, Language::Spanish) => "Lateral",
         (CameraMode::FirstPerson, Language::English) => "First Person",
         (CameraMode::FirstPerson, Language::Spanish) => "Primera Persona",
+        (CameraMode::ChestPov, Language::English) => "Chest POV",
+        (CameraMode::ChestPov, Language::Spanish) => "POV Pecho",
         (CameraMode::TurnaroundBack, Language::English) => "Back",
         (CameraMode::TurnaroundBack, Language::Spanish) => "Trasera",
         (CameraMode::TurnaroundBack34, Language::English) => "3/4 Back",
@@ -1116,6 +1118,7 @@ pub fn draw_hud(
                         CameraMode::Wide,
                         CameraMode::Side,
                         CameraMode::FirstPerson,
+                        CameraMode::ChestPov,
                     ] {
                         if ui
                             .selectable_label(camera_mode == cam, camera_name_localized(cam, lang))

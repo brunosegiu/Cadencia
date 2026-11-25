@@ -70,6 +70,7 @@ pub enum CameraMode {
     Wide,
     Side,
     FirstPerson,
+    ChestPov,
     TurnaroundBack,
     TurnaroundBack34,
     TurnaroundFront34,
@@ -84,6 +85,7 @@ impl CameraMode {
             CameraMode::Wide => "Wide",
             CameraMode::Side => "Side",
             CameraMode::FirstPerson => "First Person",
+            CameraMode::ChestPov => "Chest POV",
             CameraMode::TurnaroundBack => "Back",
             CameraMode::TurnaroundBack34 => "3/4 Back",
             CameraMode::TurnaroundFront34 => "3/4 Front",
@@ -98,7 +100,8 @@ impl CameraMode {
             CameraMode::Side => CameraMode::TurnaroundBack34,
             CameraMode::TurnaroundBack34 => CameraMode::TurnaroundFront34,
             CameraMode::TurnaroundFront34 => CameraMode::FirstPerson,
-            CameraMode::FirstPerson | CameraMode::TurnaroundBack => CameraMode::Chase,
+            CameraMode::FirstPerson => CameraMode::ChestPov,
+            CameraMode::ChestPov | CameraMode::TurnaroundBack => CameraMode::Chase,
         }
     }
 }
@@ -2012,6 +2015,13 @@ impl LigneClaireRenderer {
                 player_pos + up * 1.58 + forward * 0.25,
                 player_pos + forward * 22.0 + up * 1.25,
                 64.0,
+            ),
+            // Chest-mounted POV: just behind the shoulders, pitched ~12 deg down so the
+            // handlebars, stem, hands and forearms frame the bottom of the screen.
+            CameraMode::ChestPov => (
+                player_pos + up * 1.32 - forward * 0.15,
+                player_pos + forward * 10.0 - up * 2.1,
+                72.0,
             ),
         };
         let fov_deg = (base_fov_deg + graphics.fov_offset_deg).clamp(32.0, 80.0);
