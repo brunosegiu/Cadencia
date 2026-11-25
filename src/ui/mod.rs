@@ -14,6 +14,85 @@ use crate::world::riders::{AiRider, RiderProfile};
 use crate::world::{BiomeId, RouteSpline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Language {
+    English,
+    Spanish,
+}
+
+impl Language {
+    pub const ALL: [Language; 2] = [Language::English, Language::Spanish];
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Language::English => "English",
+            Language::Spanish => "Español",
+        }
+    }
+
+    pub fn from_locale_tag(tag: &str) -> Option<Self> {
+        let lower = tag.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let primary = lower
+            .split(['-', '_', '.', '@', ','])
+            .next()
+            .unwrap_or(lower.as_str());
+        match primary {
+            "es" | "spa" | "spanish" | "espanol" | "español" => Some(Language::Spanish),
+            "en" | "eng" | "english" => Some(Language::English),
+            _ => None,
+        }
+    }
+
+    /// Queries the user's preferred language from the operating system / browser runtime.
+    /// Defaults to `Language::English` if the OS locale is neither Spanish nor English.
+    pub fn detect_os() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for var in ["CADENCE_LANG", "LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"] {
+                if let Ok(val) = std::env::var(var) {
+                    if let Some(lang) = Self::from_locale_tag(&val) {
+                        return lang;
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetUserDefaultUILanguage() -> u16;
+            }
+            // Win32 PRIMARYLANGID is the low 10 bits of LANGID:
+            // 0x0A = LANG_SPANISH, 0x09 = LANG_ENGLISH
+            let lang_id = unsafe { GetUserDefaultUILanguage() };
+            let primary_lang = lang_id & 0x03FF;
+            if primary_lang == 0x0A {
+                return Language::Spanish;
+            }
+            if primary_lang == 0x09 {
+                return Language::English;
+            }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(win) = web_sys::window() {
+                if let Some(tag) = win.navigator().language() {
+                    if let Some(lang) = Self::from_locale_tag(&tag) {
+                        return lang;
+                    }
+                }
+            }
+        }
+
+        Language::English
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
     MainMenu,
     WorldSelect,
@@ -49,6 +128,7 @@ pub struct HudActions {
 pub struct HudState {
     pub menu_open: bool,
     pub help_toast_s: f32,
+    pub language: Language,
     avatars: HashMap<&'static str, TextureHandle>,
 }
 
@@ -57,8 +137,76 @@ impl Default for HudState {
         Self {
             menu_open: false,
             help_toast_s: 0.0,
+            language: Language::detect_os(),
             avatars: HashMap::new(),
         }
+    }
+}
+
+fn tr<'a>(lang: Language, en: &'a str, es: &'a str) -> &'a str {
+    match lang {
+        Language::English => en,
+        Language::Spanish => es,
+    }
+}
+
+fn biome_subtitle_localized(biome: BiomeId, lang: Language) -> &'static str {
+    match (biome, lang) {
+        (BiomeId::MountainClimb, Language::English) => "High Alpine Ridge & Canyon Pass",
+        (BiomeId::MountainClimb, Language::Spanish) => "Cumbre Alpina y Paso del Cañón",
+        (BiomeId::CoastalPromenade, Language::English) => "Sunset Bay Seawall & Colonial Coast",
+        (BiomeId::CoastalPromenade, Language::Spanish) => "Bahía al Atardecer y Costa Colonial",
+        (BiomeId::RollingRuralGravel, Language::English) => "Olive Hills & Countryside Gravel Loop",
+        (BiomeId::RollingRuralGravel, Language::Spanish) => "Colinas y Circuito Rural de Balastro",
+    }
+}
+
+fn biome_stats_localized(
+    biome: BiomeId,
+    lang: Language,
+) -> (&'static str, &'static str, &'static str) {
+    match (biome, lang) {
+        (BiomeId::MountainClimb, Language::English) => {
+            ("1.8 KM LOOP", "+6.8% MAX GRADE", "ALPINE TARMAC")
+        }
+        (BiomeId::MountainClimb, Language::Spanish) => {
+            ("CIRCUITO 1.8 KM", "+6.8% PEND. MÁX", "ASFALTO ALPINO")
+        }
+        (BiomeId::CoastalPromenade, Language::English) => {
+            ("2.2 KM LOOP", "+2.4% MAX GRADE", "COASTAL PAVÉ")
+        }
+        (BiomeId::CoastalPromenade, Language::Spanish) => {
+            ("CIRCUITO 2.2 KM", "+2.4% PEND. MÁX", "PAVÉ COSTERO")
+        }
+        (BiomeId::RollingRuralGravel, Language::English) => {
+            ("1.6 KM LOOP", "+4.5% MAX GRADE", "COMPACT GRAVEL")
+        }
+        (BiomeId::RollingRuralGravel, Language::Spanish) => {
+            ("CIRCUITO 1.6 KM", "+4.5% PEND. MÁX", "BALASTRO RURAL")
+        }
+    }
+}
+
+fn camera_name_localized(cam: CameraMode, lang: Language) -> &'static str {
+    match (cam, lang) {
+        (CameraMode::MainMenu, Language::English) => "Main Menu",
+        (CameraMode::MainMenu, Language::Spanish) => "Menú Principal",
+        (CameraMode::Chase, Language::English) => "Chase",
+        (CameraMode::Chase, Language::Spanish) => "Persecución",
+        (CameraMode::Close, Language::English) => "Close",
+        (CameraMode::Close, Language::Spanish) => "Cercana",
+        (CameraMode::Wide, Language::English) => "Wide",
+        (CameraMode::Wide, Language::Spanish) => "Amplia",
+        (CameraMode::Side, Language::English) => "Side",
+        (CameraMode::Side, Language::Spanish) => "Lateral",
+        (CameraMode::FirstPerson, Language::English) => "First Person",
+        (CameraMode::FirstPerson, Language::Spanish) => "Primera Persona",
+        (CameraMode::TurnaroundBack, Language::English) => "Back",
+        (CameraMode::TurnaroundBack, Language::Spanish) => "Trasera",
+        (CameraMode::TurnaroundBack34, Language::English) => "3/4 Back",
+        (CameraMode::TurnaroundBack34, Language::Spanish) => "3/4 Trasera",
+        (CameraMode::TurnaroundFront34, Language::English) => "3/4 Front",
+        (CameraMode::TurnaroundFront34, Language::Spanish) => "3/4 Frontal",
     }
 }
 
@@ -355,12 +503,13 @@ pub fn draw_hud(
             }
 
             // Metrics: W/KG, AVG, RPM (heart rate removed)
+            let lang = hud_state.language;
             let wkg = telemetry.power_w / sim.rider_weight_kg.max(35.0);
             let avg_w = physics.avg_power_w.round() as i32;
             let cad = telemetry.cadence_rpm.round() as i32;
             let cells = [
                 (0, 0, format!("{wkg:.1}"), "W/KG"),
-                (1, 0, format!("{avg_w}"), "AVG"),
+                (1, 0, format!("{avg_w}"), tr(lang, "AVG", "PROM")),
                 (0, 1, format!("{cad}"), "RPM"),
             ];
             for (cx_i, cy_i, val, lbl) in cells {
@@ -440,8 +589,9 @@ pub fn draw_hud(
             let secs = total_s % 60;
 
             let y_top = rect.min.y + 20.0;
+            let lang = hud_state.language;
             let metrics = [
-                (rect.min.x + 52.0, format!("{kph:.1}"), "KPH"),
+                (rect.min.x + 52.0, format!("{kph:.1}"), tr(lang, "KPH", "KM/H")),
                 (rect.min.x + 138.0, format!("{km:.1}"), "KM"),
                 (rect.min.x + 212.0, format!("{elev_gain}"), "M"),
                 (rect.min.x + 310.0, format!("{hrs}:{mins:02}:{secs:02}"), ""),
@@ -653,7 +803,7 @@ pub fn draw_hud(
             p.text(
                 Pos2::new(prof_rect.min.x + 56.0, prof_rect.min.y + 31.0),
                 Align2::LEFT_CENTER,
-                format!("LVL {}", player_profile.level),
+                format!("{} {}", tr(hud_state.language, "LVL", "NVL"), player_profile.level),
                 FontId::new(10.5, FontFamily::Proportional),
                 Color32::from_rgb(212, 198, 178),
             );
@@ -736,7 +886,7 @@ pub fn draw_hud(
             p.text(
                 hdr.center(),
                 Align2::CENTER_CENTER,
-                "Riders Nearby",
+                tr(hud_state.language, "Riders Nearby", "Ciclistas Cercanos"),
                 FontId::new(13.0, FontFamily::Proportional),
                 ink,
             );
@@ -852,13 +1002,14 @@ pub fn draw_hud(
                             );
                             was_tapped(ui, &resp)
                         };
-                        if draw_action(ui, 0, "Take Screenshot") {
+                        let lang = hud_state.language;
+                        if draw_action(ui, 0, tr(lang, "Take Screenshot", "Capturar Pantalla")) {
                             actions.request_screenshot = true;
                         }
-                        if draw_action(ui, 1, "Settings") {
+                        if draw_action(ui, 1, tr(lang, "Settings", "Ajustes")) {
                             hud_state.menu_open = !hud_state.menu_open;
                         }
-                        if draw_action(ui, 2, "Camera View") {
+                        if draw_action(ui, 2, tr(lang, "Camera View", "Vista de Cámara")) {
                             actions.cycle_camera = Some(camera_mode.next());
                         }
                     });
@@ -867,16 +1018,31 @@ pub fn draw_hud(
 
     // 7. INTERACTIVE ACTION MENU / SIMULATOR / BLE DRAWER (no on-the-fly world switching)
     if hud_state.menu_open {
-        egui::Window::new("Cadence Control & Trainer Hub")
+        let lang = hud_state.language;
+        egui::Window::new(tr(
+            lang,
+            "Cadence Control & Trainer Hub",
+            "Centro de Control y Rodillo Cadence",
+        ))
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
             .resizable(false)
             .default_width(390.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("Active World: {}", biome.name())).strong());
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            tr(lang, "Active World", "Mundo Activo"),
+                            biome.name()
+                        ))
+                        .strong(),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("End Ride / Main Menu").clicked() {
+                        if ui
+                            .button(tr(lang, "End Ride / Main Menu", "Terminar / Menú Principal"))
+                            .clicked()
+                        {
                             hud_state.menu_open = false;
                             actions.navigate_to = Some(AppScreen::MainMenu);
                         }
@@ -884,7 +1050,21 @@ pub fn draw_hud(
                 });
 
                 ui.separator();
-                ui.label(egui::RichText::new("Camera Angle").strong());
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tr(lang, "Language", "Idioma")).strong());
+                    for l in Language::ALL {
+                        if ui
+                            .selectable_label(hud_state.language == l, l.display_name())
+                            .clicked()
+                        {
+                            hud_state.language = l;
+                        }
+                    }
+                });
+
+                let lang = hud_state.language;
+                ui.separator();
+                ui.label(egui::RichText::new(tr(lang, "Camera Angle", "Ángulo de Cámara")).strong());
                 ui.horizontal_wrapped(|ui| {
                     for cam in [
                         CameraMode::Chase,
@@ -893,47 +1073,96 @@ pub fn draw_hud(
                         CameraMode::Side,
                         CameraMode::FirstPerson,
                     ] {
-                        if ui.selectable_label(camera_mode == cam, cam.name()).clicked() {
+                        if ui
+                            .selectable_label(camera_mode == cam, camera_name_localized(cam, lang))
+                            .clicked()
+                        {
                             actions.cycle_camera = Some(cam);
                         }
                     }
                 });
 
                 ui.separator();
-                ui.label(egui::RichText::new("Hardware & BLE Smart Trainer").strong());
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Hardware & BLE Smart Trainer",
+                        "Hardware y Rodillo Inteligente BLE",
+                    ))
+                    .strong(),
+                );
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(using_sim, "Built-in Simulator").clicked() {
+                    if ui
+                        .selectable_label(using_sim, tr(lang, "Built-in Simulator", "Simulador Integrado"))
+                        .clicked()
+                    {
                         actions.use_simulator = true;
                     }
-                    if ui.button("Scan & Connect BLE").clicked() {
+                    if ui
+                        .button(tr(lang, "Scan & Connect BLE", "Buscar y Conectar BLE"))
+                        .clicked()
+                    {
                         actions.start_ble_scan = true;
                     }
-                    if !using_sim && ui.button("Disconnect BLE").clicked() {
+                    if !using_sim
+                        && ui
+                            .button(tr(lang, "Disconnect BLE", "Desconectar BLE"))
+                            .clicked()
+                    {
                         actions.disconnect_ble = true;
                     }
                 });
-                ui.small(format!("Status: {ble_status}"));
+                ui.small(format!("{}: {ble_status}", tr(lang, "Status", "Estado")));
 
                 ui.separator();
-                ui.label(egui::RichText::new("Trainer Simulator Controls").strong());
-                ui.add(egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0).text("Power (W)"));
-                ui.add(egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0).text("Cadence (RPM)"));
-                ui.add(egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0).text("Heart Rate (BPM)"));
-                ui.add(egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0).text("Rider Weight (kg)"));
+                ui.label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Trainer Simulator Controls",
+                        "Controles del Simulador",
+                    ))
+                    .strong(),
+                );
+                ui.add(
+                    egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0)
+                        .text(tr(lang, "Power (W)", "Potencia (W)")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0)
+                        .text(tr(lang, "Cadence (RPM)", "Cadencia (RPM)")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0)
+                        .text(tr(lang, "Heart Rate (BPM)", "Pulso (PPM)")),
+                );
+                ui.add(
+                    egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0)
+                        .text(tr(lang, "Rider Weight (kg)", "Peso del Ciclista (kg)")),
+                );
                 ui.horizontal(|ui| {
-                    ui.label(format!("Virtual Gear: {}", sim.gear));
+                    ui.label(format!(
+                        "{}: {}",
+                        tr(lang, "Virtual Gear", "Marcha Virtual"),
+                        sim.gear
+                    ));
                     if ui.button(" - ").clicked() {
                         sim.shift_gear(-1);
                     }
                     if ui.button(" + ").clicked() {
                         sim.shift_gear(1);
                     }
-                    ui.checkbox(&mut sim.erg_mode, "ERG Mode");
-                    ui.checkbox(&mut sim.micro_variation, "Live Noise");
+                    ui.checkbox(&mut sim.erg_mode, tr(lang, "ERG Mode", "Modo ERG"));
+                    ui.checkbox(&mut sim.micro_variation, tr(lang, "Live Noise", "Variación Real"));
                 });
                 if sim.erg_mode {
                     let mut erg_w = sim.erg_target_w as f32;
-                    if ui.add(egui::Slider::new(&mut erg_w, 60.0..=500.0).text("ERG Target (W)")).changed() {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut erg_w, 60.0..=500.0)
+                                .text(tr(lang, "ERG Target (W)", "Objetivo ERG (W)")),
+                        )
+                        .changed()
+                    {
                         sim.erg_target_w = erg_w as u16;
                     }
                 }
@@ -941,15 +1170,20 @@ pub fn draw_hud(
                 ui.separator();
                 let f = &physics.last_forces;
                 ui.small(format!(
-                    "Forces: Drive {:.0}N | Grav {:.0}N | Roll {:.1}N | Aero {:.0}N | Draft {:.0}%",
+                    "{}: Drive {:.0}N | Grav {:.0}N | Roll {:.1}N | Aero {:.0}N | Draft {:.0}%",
+                    tr(lang, "Forces", "Fuerzas"),
                     f.f_drive_n,
                     f.f_gravity_n,
                     f.f_rolling_n,
                     f.f_aero_n,
                     physics.draft_factor * 100.0
                 ));
-                ui.small("Hotkeys: C Camera · M/Esc Menu · ↑/↓ Watts · ←/→ Gears · F12 Screenshot");
-                if ui.button("Close Menu").clicked() {
+                ui.small(tr(
+                    lang,
+                    "Hotkeys: C Camera · M/Esc Menu · ↑/↓ Watts · ←/→ Gears · F12 Screenshot",
+                    "Atajos: C Cámara · M/Esc Menú · ↑/↓ Vatios · ←/→ Marchas · F12 Captura",
+                ));
+                if ui.button(tr(lang, "Close Menu", "Cerrar Menú")).clicked() {
                     hud_state.menu_open = false;
                 }
             });
@@ -1198,7 +1432,7 @@ fn was_tapped(ui: &Ui, resp: &egui::Response) -> bool {
     false
 }
 
-fn draw_main_menu(ctx: &egui::Context) -> HudActions {
+fn draw_main_menu(ctx: &egui::Context, lang: Language) -> HudActions {
     let mut actions = HudActions::default();
     let screen = ctx.input(|i| i.content_rect());
     let w = screen.width().max(640.0);
@@ -1245,19 +1479,23 @@ fn draw_main_menu(ctx: &egui::Context) -> HudActions {
 
             let p = ui.painter();
 
-            // 1. Large top "RIDE" card
+            // 1. Large top "RIDE" / "RODAR" card
             draw_menu_card_frame(&p, ride_rect, ride_resp.hovered(), (18.0 * scale) as u8);
+            let ride_font_sz = match lang {
+                Language::English => 108.0 * scale,
+                Language::Spanish => 96.0 * scale,
+            };
             draw_double_outlined_title(
                 &p,
                 ride_rect.center() + Vec2::new(0.0, 2.0 * scale_y),
-                "RIDE",
-                108.0 * scale,
+                tr(lang, "RIDE", "RODAR"),
+                ride_font_sz,
                 Color32::from_rgb(36, 36, 30),
                 Color32::from_rgb(245, 242, 234),
                 Color32::from_rgb(20, 18, 16),
             );
 
-            // 2. Bottom-left "SETTINGS" card + straddling cog icon
+            // 2. Bottom-left "SETTINGS" / "AJUSTES" card + straddling cog icon
             draw_menu_card_frame(&p, settings_rect, settings_resp.hovered(), (16.0 * scale) as u8);
             draw_settings_cog_icon(
                 &p,
@@ -1268,14 +1506,14 @@ fn draw_main_menu(ctx: &egui::Context) -> HudActions {
                 &p,
                 Pos2::new(settings_rect.center().x, settings_rect.min.y + 68.0 * scale_y),
                 Align2::CENTER_CENTER,
-                "SETTINGS",
+                tr(lang, "SETTINGS", "AJUSTES"),
                 FontId::new(31.0 * scale, FontFamily::Proportional),
                 Color32::from_rgb(244, 240, 232),
                 Color32::from_rgb(22, 20, 16),
                 2.0 * scale,
             );
 
-            // 3. Bottom-right "GEAR" card + straddling color-blocked jersey icon
+            // 3. Bottom-right "GEAR" / "EQUIPO" card + straddling color-blocked jersey icon
             draw_menu_card_frame(&p, gear_rect, gear_resp.hovered(), (16.0 * scale) as u8);
             draw_jersey_gear_icon(
                 &p,
@@ -1286,7 +1524,7 @@ fn draw_main_menu(ctx: &egui::Context) -> HudActions {
                 &p,
                 Pos2::new(gear_rect.center().x, gear_rect.min.y + 68.0 * scale_y),
                 Align2::CENTER_CENTER,
-                "GEAR",
+                tr(lang, "GEAR", "EQUIPO"),
                 FontId::new(31.0 * scale, FontFamily::Proportional),
                 Color32::from_rgb(244, 240, 232),
                 Color32::from_rgb(22, 20, 16),
@@ -1307,7 +1545,7 @@ fn draw_main_menu(ctx: &egui::Context) -> HudActions {
     actions
 }
 
-fn draw_back_pill(ui: &mut Ui, pos: Pos2, scale: f32) -> bool {
+fn draw_back_pill(ui: &mut Ui, pos: Pos2, scale: f32, lang: Language) -> bool {
     let rect = Rect::from_min_size(pos, Vec2::new(138.0 * scale, 46.0 * scale));
     let resp = ui.interact(rect, ui.scope_id().with("menu_back_pill"), Sense::click());
     let p = ui.painter();
@@ -1316,7 +1554,7 @@ fn draw_back_pill(ui: &mut Ui, pos: Pos2, scale: f32) -> bool {
         &p,
         rect.center(),
         Align2::CENTER_CENTER,
-        "BACK",
+        tr(lang, "BACK", "ATRÁS"),
         FontId::new(21.0 * scale, FontFamily::Proportional),
         Color32::from_rgb(244, 240, 232),
         Color32::from_rgb(22, 20, 16),
@@ -1419,7 +1657,7 @@ fn draw_world_preview_banner(p: &egui::Painter, rect: Rect, biome: BiomeId) {
     );
 }
 
-fn draw_world_select(ctx: &egui::Context) -> HudActions {
+fn draw_world_select(ctx: &egui::Context, lang: Language) -> HudActions {
     let mut actions = HudActions::default();
     let screen = ctx.input(|i| i.content_rect());
     let w = screen.width().max(640.0);
@@ -1438,14 +1676,14 @@ fn draw_world_select(ctx: &egui::Context) -> HudActions {
             // Subtle backdrop tint so cards pop cleanly over the live 3D world
             p.rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(75));
 
-            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale, lang) {
                 actions.navigate_to = Some(AppScreen::MainMenu);
             }
 
             draw_double_outlined_title(
                 &p,
                 Pos2::new(w * 0.5, 62.0 * scale_y),
-                "SELECT WORLD",
+                tr(lang, "SELECT WORLD", "ELEGIR MUNDO"),
                 52.0 * scale,
                 Color32::from_rgb(36, 36, 30),
                 Color32::from_rgb(245, 242, 234),
@@ -1491,13 +1729,13 @@ fn draw_world_select(ctx: &egui::Context) -> HudActions {
                 p.text(
                     Pos2::new(card_rect.center().x, banner_rect.max.y + 60.0 * scale_y),
                     Align2::CENTER_CENTER,
-                    biome.subtitle(),
+                    biome_subtitle_localized(biome, lang),
                     FontId::new(14.0 * scale, FontFamily::Proportional),
                     Color32::from_rgb(206, 200, 186),
                 );
 
                 // 3 Stat badges
-                let (len_lbl, grade_lbl, surf_lbl) = biome.stats_summary();
+                let (len_lbl, grade_lbl, surf_lbl) = biome_stats_localized(biome, lang);
                 let badges = [len_lbl, grade_lbl, surf_lbl];
                 let bw = (card_w - 44.0 * scale_x) / 3.0;
                 for (bi, &btxt) in badges.iter().enumerate() {
@@ -1594,7 +1832,7 @@ fn draw_world_select(ctx: &egui::Context) -> HudActions {
                     &p,
                     btn_rect.center(),
                     Align2::CENTER_CENTER,
-                    "RIDE WORLD",
+                    tr(lang, "RIDE WORLD", "RODAR MUNDO"),
                     FontId::new(21.0 * scale, FontFamily::Proportional),
                     Color32::WHITE,
                     Color32::from_rgb(22, 18, 14),
@@ -1612,6 +1850,7 @@ fn draw_world_select(ctx: &egui::Context) -> HudActions {
 
 fn draw_settings_screen(
     ctx: &egui::Context,
+    hud_state: &mut HudState,
     graphics: &mut GraphicsSettings,
     sim: &mut SimulatedHardware,
     using_sim: bool,
@@ -1624,6 +1863,7 @@ fn draw_settings_screen(
     let scale_x = (w / 1280.0).clamp(0.65, 1.6);
     let scale_y = (h / 960.0).clamp(0.65, 1.6);
     let scale = scale_x.min(scale_y);
+    let lang = hud_state.language;
 
     egui::Area::new(egui::Id::unique("cadence_settings_backdrop"))
         .fade_in(false)
@@ -1632,13 +1872,13 @@ fn draw_settings_screen(
             let _ = ui.allocate_rect(screen, Sense::hover());
             let p = ui.painter().clone();
             p.rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(85));
-            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale, lang) {
                 actions.navigate_to = Some(AppScreen::MainMenu);
             }
             draw_double_outlined_title(
                 &p,
                 Pos2::new(w * 0.5, 62.0 * scale_y),
-                "SETTINGS",
+                tr(lang, "SETTINGS", "AJUSTES"),
                 52.0 * scale,
                 Color32::from_rgb(36, 36, 30),
                 Color32::from_rgb(245, 242, 234),
@@ -1651,81 +1891,200 @@ fn draw_settings_screen(
         .collapsible(false)
         .resizable(false)
         .title_bar(false)
-        .fixed_size(Vec2::new(720.0 * scale_x, 460.0 * scale_y))
+        .fixed_size(Vec2::new(720.0 * scale_x, 488.0 * scale_y))
         .frame(
             egui::Frame::NONE
                 .fill(Color32::from_rgba_unmultiplied(34, 34, 28, 235))
                 .corner_radius(CornerRadius::same(16))
                 .stroke(Stroke::new(2.0, Color32::from_rgba_unmultiplied(178, 172, 156, 175)))
-                .inner_margin(egui::Margin::symmetric(28, 24)),
+                .inner_margin(egui::Margin::symmetric(28, 22)),
         )
         .show(ctx, |ui| {
+            // Language selector bar at top of Settings window
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}:", tr(hud_state.language, "Language", "Idioma")))
+                        .color(Color32::WHITE)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                for l in Language::ALL {
+                    if ui
+                        .selectable_label(hud_state.language == l, l.display_name())
+                        .clicked()
+                    {
+                        hud_state.language = l;
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            let lang = hud_state.language;
             ui.columns(2, |cols| {
                 // Column 0: Graphics Settings
-                cols[0].heading(egui::RichText::new("Graphics & Rendering").color(Color32::WHITE).strong());
+                cols[0].heading(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Graphics & Rendering",
+                        "Gráficos y Renderizado",
+                    ))
+                    .color(Color32::WHITE)
+                    .strong(),
+                );
                 cols[0].add_space(10.0);
-                cols[0].label(egui::RichText::new("Ligne Claire Ink Outline Weight").color(Color32::from_rgb(224, 218, 206)));
-                cols[0].add(egui::Slider::new(&mut graphics.outline_scale, 0.25..=1.75).text("Scale"));
+                cols[0].label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Ligne Claire Ink Outline Weight",
+                        "Grosor de Trazo Ligne Claire",
+                    ))
+                    .color(Color32::from_rgb(224, 218, 206)),
+                );
+                cols[0].add(
+                    egui::Slider::new(&mut graphics.outline_scale, 0.25..=1.75)
+                        .text(tr(lang, "Scale", "Escala")),
+                );
                 cols[0].add_space(8.0);
-                cols[0].label(egui::RichText::new("Scenery & Prop Draw Distance").color(Color32::from_rgb(224, 218, 206)));
-                cols[0].add(egui::Slider::new(&mut graphics.prop_draw_distance_m, 250.0..=900.0).text("Meters"));
+                cols[0].label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Scenery & Prop Draw Distance",
+                        "Distancia de Dibujo del Paisaje",
+                    ))
+                    .color(Color32::from_rgb(224, 218, 206)),
+                );
+                cols[0].add(
+                    egui::Slider::new(&mut graphics.prop_draw_distance_m, 250.0..=900.0)
+                        .text(tr(lang, "Meters", "Metros")),
+                );
                 cols[0].add_space(8.0);
-                cols[0].label(egui::RichText::new("Camera Field of View Offset").color(Color32::from_rgb(224, 218, 206)));
-                cols[0].add(egui::Slider::new(&mut graphics.fov_offset_deg, -10.0..=10.0).text("Degrees"));
+                cols[0].label(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Camera Field of View Offset",
+                        "Ajuste de Campo de Visión (FOV)",
+                    ))
+                    .color(Color32::from_rgb(224, 218, 206)),
+                );
+                cols[0].add(
+                    egui::Slider::new(&mut graphics.fov_offset_deg, -10.0..=10.0)
+                        .text(tr(lang, "Degrees", "Grados")),
+                );
                 cols[0].add_space(10.0);
-                cols[0].checkbox(&mut graphics.shadows_enabled, "Enable Directional Sun Shadows (2048x2048)");
+                cols[0].checkbox(
+                    &mut graphics.shadows_enabled,
+                    tr(
+                        lang,
+                        "Enable Directional Sun Shadows (2048x2048)",
+                        "Activar Sombras Solares (2048x2048)",
+                    ),
+                );
                 cols[0].add_space(6.0);
-                cols[0].checkbox(&mut graphics.taa_enabled, "Enable Temporal Anti-Aliasing (TAA)");
+                cols[0].checkbox(
+                    &mut graphics.taa_enabled,
+                    tr(
+                        lang,
+                        "Enable Temporal Anti-Aliasing (TAA)",
+                        "Activar Suavizado Temporal (TAA)",
+                    ),
+                );
                 cols[0].add_space(14.0);
-                if cols[0].button("Reset Graphics Defaults").clicked() {
+                if cols[0]
+                    .button(tr(lang, "Reset Graphics Defaults", "Restablecer Gráficos"))
+                    .clicked()
+                {
                     *graphics = GraphicsSettings::default();
                 }
 
                 // Column 1: Game & Smart Trainer Settings
-                cols[1].heading(egui::RichText::new("Game & Trainer Hardware").color(Color32::WHITE).strong());
+                cols[1].heading(
+                    egui::RichText::new(tr(
+                        lang,
+                        "Game & Trainer Hardware",
+                        "Juego y Rodillo Inteligente",
+                    ))
+                    .color(Color32::WHITE)
+                    .strong(),
+                );
                 cols[1].add_space(10.0);
                 cols[1].horizontal(|ui| {
-                    if ui.selectable_label(using_sim, "Built-in Simulator").clicked() {
+                    if ui
+                        .selectable_label(using_sim, tr(lang, "Built-in Simulator", "Simulador Integrado"))
+                        .clicked()
+                    {
                         actions.use_simulator = true;
                     }
-                    if ui.button("Scan & Connect BLE").clicked() {
+                    if ui
+                        .button(tr(lang, "Scan & Connect BLE", "Buscar y Conectar BLE"))
+                        .clicked()
+                    {
                         actions.start_ble_scan = true;
                     }
-                    if !using_sim && ui.button("Disconnect").clicked() {
+                    if !using_sim && ui.button(tr(lang, "Disconnect", "Desconectar")).clicked() {
                         actions.disconnect_ble = true;
                     }
                 });
-                cols[1].small(egui::RichText::new(format!("Status: {ble_status}")).color(Color32::from_rgb(200, 196, 184)));
+                cols[1].small(
+                    egui::RichText::new(format!("{}: {ble_status}", tr(lang, "Status", "Estado")))
+                        .color(Color32::from_rgb(200, 196, 184)),
+                );
                 cols[1].add_space(10.0);
-                cols[1].add(egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0).text("Rider Weight (kg)"));
-                cols[1].add(egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0).text("Sim Power (W)"));
-                cols[1].add(egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0).text("Sim Cadence (RPM)"));
-                cols[1].add(egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0).text("Sim Heart Rate (BPM)"));
+                cols[1].add(
+                    egui::Slider::new(&mut sim.rider_weight_kg, 45.0..=115.0)
+                        .text(tr(lang, "Rider Weight (kg)", "Peso del Ciclista (kg)")),
+                );
+                cols[1].add(
+                    egui::Slider::new(&mut sim.target_power_w, 0.0..=600.0)
+                        .text(tr(lang, "Sim Power (W)", "Potencia Sim (W)")),
+                );
+                cols[1].add(
+                    egui::Slider::new(&mut sim.target_cadence_rpm, 0.0..=130.0)
+                        .text(tr(lang, "Sim Cadence (RPM)", "Cadencia Sim (RPM)")),
+                );
+                cols[1].add(
+                    egui::Slider::new(&mut sim.target_hr_bpm, 75.0..=195.0)
+                        .text(tr(lang, "Sim Heart Rate (BPM)", "Pulso Sim (PPM)")),
+                );
                 cols[1].add_space(6.0);
                 cols[1].horizontal(|ui| {
-                    ui.label(format!("Virtual Gear: {}", sim.gear));
+                    ui.label(format!(
+                        "{}: {}",
+                        tr(lang, "Virtual Gear", "Marcha Virtual"),
+                        sim.gear
+                    ));
                     if ui.button(" - ").clicked() {
                         sim.shift_gear(-1);
                     }
                     if ui.button(" + ").clicked() {
                         sim.shift_gear(1);
                     }
-                    ui.checkbox(&mut sim.erg_mode, "ERG Mode");
-                    ui.checkbox(&mut sim.micro_variation, "Live Noise");
+                    ui.checkbox(&mut sim.erg_mode, tr(lang, "ERG Mode", "Modo ERG"));
+                    ui.checkbox(&mut sim.micro_variation, tr(lang, "Live Noise", "Variación Real"));
                 });
                 if sim.erg_mode {
                     let mut erg_w = sim.erg_target_w as f32;
-                    if cols[1].add(egui::Slider::new(&mut erg_w, 60.0..=500.0).text("ERG Target (W)")).changed() {
+                    if cols[1]
+                        .add(
+                            egui::Slider::new(&mut erg_w, 60.0..=500.0)
+                                .text(tr(lang, "ERG Target (W)", "Objetivo ERG (W)")),
+                        )
+                        .changed()
+                    {
                         sim.erg_target_w = erg_w as u16;
                     }
                 }
             });
 
-            ui.add_space(18.0);
+            ui.add_space(14.0);
             ui.separator();
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button("Back to Main Menu").clicked() {
+                if ui
+                    .button(tr(lang, "Back to Main Menu", "Volver al Menú Principal"))
+                    .clicked()
+                {
                     actions.navigate_to = Some(AppScreen::MainMenu);
                 }
             });
@@ -1734,7 +2093,7 @@ fn draw_settings_screen(
     actions
 }
 
-fn draw_avatar_editor_screen(ctx: &egui::Context) -> HudActions {
+fn draw_avatar_editor_screen(ctx: &egui::Context, lang: Language) -> HudActions {
     let mut actions = HudActions::default();
     let screen = ctx.input(|i| i.content_rect());
     let w = screen.width().max(640.0);
@@ -1750,7 +2109,7 @@ fn draw_avatar_editor_screen(ctx: &egui::Context) -> HudActions {
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
             let _ = ui.allocate_rect(screen, Sense::hover());
-            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale) {
+            if draw_back_pill(ui, Pos2::new(42.0 * scale_x, 36.0 * scale_y), scale, lang) {
                 actions.navigate_to = Some(AppScreen::MainMenu);
             }
         });
@@ -1775,11 +2134,14 @@ pub fn draw_ui(
     ble_status: &str,
     camera_mode: CameraMode,
 ) -> HudActions {
+    let lang = hud_state.language;
     match screen_mode {
-        AppScreen::MainMenu => draw_main_menu(ctx),
-        AppScreen::WorldSelect => draw_world_select(ctx),
-        AppScreen::Settings => draw_settings_screen(ctx, graphics, sim, using_sim, ble_status),
-        AppScreen::AvatarEditor => draw_avatar_editor_screen(ctx),
+        AppScreen::MainMenu => draw_main_menu(ctx, lang),
+        AppScreen::WorldSelect => draw_world_select(ctx, lang),
+        AppScreen::Settings => {
+            draw_settings_screen(ctx, hud_state, graphics, sim, using_sim, ble_status)
+        }
+        AppScreen::AvatarEditor => draw_avatar_editor_screen(ctx, lang),
         AppScreen::InGame => draw_hud(
             ctx,
             hud_state,
@@ -1794,5 +2156,27 @@ pub fn draw_ui(
             ble_status,
             camera_mode,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_english_and_spanish_os_locale_tags_and_detects_os_language() {
+        assert_eq!(Language::from_locale_tag("en"), Some(Language::English));
+        assert_eq!(Language::from_locale_tag("en-US"), Some(Language::English));
+        assert_eq!(Language::from_locale_tag("en_GB.UTF-8"), Some(Language::English));
+        assert_eq!(Language::from_locale_tag("es"), Some(Language::Spanish));
+        assert_eq!(Language::from_locale_tag("es-UY"), Some(Language::Spanish));
+        assert_eq!(Language::from_locale_tag("es_ES.UTF-8"), Some(Language::Spanish));
+        assert_eq!(Language::from_locale_tag("Spanish"), Some(Language::Spanish));
+        assert_eq!(Language::from_locale_tag("fr-FR"), None);
+
+        let detected = Language::detect_os();
+        assert!(Language::ALL.contains(&detected));
+        assert_eq!(tr(Language::English, "SETTINGS", "AJUSTES"), "SETTINGS");
+        assert_eq!(tr(Language::Spanish, "SETTINGS", "AJUSTES"), "AJUSTES");
     }
 }
