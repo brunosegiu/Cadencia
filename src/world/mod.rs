@@ -534,5 +534,66 @@ mod tests {
         let d1_rev = ai.iter().find(|r| r.direction < 0.0).unwrap().distance_m;
         assert!(d1_fwd > d0_fwd);
         assert!(d1_rev < d0_rev);
+
+        // Verify Rambla (CoastalPromenade) has 20+ building types, reuses Campo trees,
+        // places street-edge benches facing the sea with seated pedestrians, and spawns dynamic Rambla walkers
+        let rambla_sp = RouteSpline::for_biome(BiomeId::CoastalPromenade);
+        let rambla_geo = crate::world::terrain::build_biome_world(BiomeId::CoastalPromenade, &rambla_sp);
+        let mut rambla_building_types = std::collections::HashSet::new();
+        for p in &rambla_geo.props {
+            if matches!(
+                p.model,
+                crate::assets::ModelId::RamblaBuilding(_)
+                    | crate::assets::ModelId::ColonialTownhouse
+                    | crate::assets::ModelId::CoastalBuildingMid
+                    | crate::assets::ModelId::CoastalBuildingTall
+            ) {
+                rambla_building_types.insert(p.model);
+            }
+        }
+        assert!(
+            rambla_building_types.len() >= 20,
+            "expected at least 20 distinct building types on the Rambla (got {})",
+            rambla_building_types.len()
+        );
+        assert!(rambla_geo
+            .props
+            .iter()
+            .any(|p| matches!(p.model, crate::assets::ModelId::TreeOmbu(_))));
+        assert!(rambla_geo
+            .props
+            .iter()
+            .any(|p| matches!(p.model, crate::assets::ModelId::TreeCeibo(_))));
+        assert!(rambla_geo
+            .props
+            .iter()
+            .any(|p| matches!(p.model, crate::assets::ModelId::TreeEucalyptus(_))));
+        assert!(rambla_geo
+            .props
+            .iter()
+            .any(|p| matches!(p.model, crate::assets::ModelId::SmallPalm(_))));
+        assert!(rambla_geo
+            .props
+            .iter()
+            .any(|p| matches!(p.model, crate::assets::ModelId::RamblaSeated(_))));
+
+        let mut rambla_walkers =
+            crate::world::riders::spawn_biome_animals(BiomeId::CoastalPromenade, &rambla_sp);
+        assert!(
+            rambla_walkers.len() >= 25,
+            "expected dynamic walking pedestrians on the Rambla (got {})",
+            rambla_walkers.len()
+        );
+        assert!(rambla_walkers
+            .iter()
+            .all(|w| w.species == crate::world::riders::AnimalSpecies::RamblaWalker));
+        let w0_d = rambla_walkers[0].dist_m;
+        crate::world::riders::step_animals(
+            0.2,
+            &rambla_sp,
+            BiomeId::CoastalPromenade,
+            &mut rambla_walkers,
+        );
+        assert!((rambla_walkers[0].dist_m - w0_d).abs() > 0.05);
     }
 }

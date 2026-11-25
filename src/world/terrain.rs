@@ -975,44 +975,105 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         }
         BiomeId::CoastalPromenade => {
             let total = spline.total_length_m;
+            let hero_d = spline.hero_start_dist_m;
             let mut d = 0.0_f32;
             let mut idx = 0_u32;
             while d < total {
                 let s = spline.sample(d);
                 let yaw = (-s.tangent.x).atan2(-s.tangent.z);
 
-                // Palms & leafy street trees on left sidewalk
+                // 1. Left Sidewalk Curb Trees: reuse Campo trees (Ombu, Ceibo, Eucalyptus, SmallPalm) + tall coastal PalmTrees
                 if idx % 2 == 0 {
-                    let lat_tree = -(road_hw + 2.5);
-                    let model = if idx % 6 == 0 { ModelId::TreeCanopy } else { ModelId::PalmTree };
-                    let sc = if model == ModelId::PalmTree { 1.15 + hash_u32(idx * 19) * 0.25 } else { 1.0 };
+                    let tree_slot = (idx / 2) % 7;
+                    let v_t = (((idx * 13) / 2) % 10) as u8;
+                    let (tree_model, lat_tree, sc) = match tree_slot {
+                        0 | 3 => (
+                            ModelId::PalmTree,
+                            -(road_hw + 2.35),
+                            1.10 + hash_u32(idx * 19) * 0.25,
+                        ),
+                        1 => (
+                            ModelId::TreeCeibo(v_t),
+                            -(road_hw + 2.85),
+                            0.86 + hash_u32(idx * 23) * 0.18,
+                        ),
+                        2 | 5 => (
+                            ModelId::SmallPalm(v_t),
+                            -(road_hw + 2.40),
+                            0.95 + hash_u32(idx * 29) * 0.22,
+                        ),
+                        4 => (
+                            ModelId::TreeOmbu(v_t),
+                            -(road_hw + 3.30),
+                            0.78 + hash_u32(idx * 31) * 0.16,
+                        ),
+                        _ => (
+                            ModelId::TreeEucalyptus(v_t),
+                            -(road_hw + 3.45),
+                            0.82 + hash_u32(idx * 37) * 0.18,
+                        ),
+                    };
                     push_prop(
-                        model,
-                        s.pos + s.right * lat_tree + Vec3::Y * 0.14,
-                        yaw + hash_u32(idx * 23) * 1.8,
+                        tree_model,
+                        s.pos + s.right * lat_tree + Vec3::Y * 0.12,
+                        yaw + hash_u32(idx * 23) * 6.28,
                         Vec3::splat(sc),
                         [1.0; 4],
                         0.85,
-                        0.6,
+                        0.0,
                         true,
                     );
                 }
 
-                // Buildings along left promenade avenue: colonial townhouses near hero, stepped coastal mid/tall blocks curving away
+                // 2. Left Avenue Buildings: 23 distinct Montevideo Rambla building types (RamblaBuilding(0..19) + 3 classic models)
+                //    Plus Campo trees & bushes planted in the building forecourts / courtyards!
                 if idx % 2 == 0 {
-                    let r = hash_u32(idx * 41);
-                    let dist_from_hero = (d - spline.hero_start_dist_m).rem_euclid(total);
-                    let (model, lat_b) = if (0.0..52.0).contains(&dist_from_hero) {
-                        (ModelId::ColonialTownhouse, -(road_hw + 11.4))
-                    } else if r > 0.40 {
-                        (ModelId::CoastalBuildingTall, -(road_hw + 13.6))
+                    let b_idx = idx / 2;
+                    let dist_from_hero = (d - hero_d).rem_euclid(total);
+                    // Curated progression along the hero bay vista (colonial/low-rise in immediate foreground,
+                    // stepping up through Art Deco, Balcon Corrido mid-rises, and Pocitos/Malvin towers along the bay curve),
+                    // and non-repeating permutation of all 23 types around the full loop!
+                    let b_type: u32 = if (0.0..18.0).contains(&dist_from_hero) {
+                        0 // 2-story Colonial Villa with ground-floor arcade
+                    } else if (18.0..36.0).contains(&dist_from_hero) {
+                        1 // 2-story Corner Bistro with terracotta awnings
+                    } else if (36.0..54.0).contains(&dist_from_hero) {
+                        20 // Classic ColonialTownhouse
+                    } else if (54.0..74.0).contains(&dist_from_hero) {
+                        4 // 4-story Art Deco Streamline Moderne
+                    } else if (74.0..94.0).contains(&dist_from_hero) {
+                        7 // 6-story Red Brick & White Concrete Ribbon Balcony Block
+                    } else if (94.0..114.0).contains(&dist_from_hero) {
+                        8 // 7-story Classic Pocitos Balcon Corrido
+                    } else if (114.0..134.0).contains(&dist_from_hero) {
+                        12 // 9-story Stepped Terrace Building
+                    } else if (134.0..154.0).contains(&dist_from_hero) {
+                        15 // 11-story Contemporary White & Marine Staggered Balcony Tower
+                    } else if (154.0..174.0).contains(&dist_from_hero) {
+                        16 // 11-story Punta Carretas Brick & Travertine Tower
+                    } else if (174.0..194.0).contains(&dist_from_hero) {
+                        18 // 13-story Twin-Slab Cream & Ochre High-Rise
+                    } else if (194.0..215.0).contains(&dist_from_hero) {
+                        19 // 14-story Landmark Panorama Tower
                     } else {
-                        (ModelId::CoastalBuildingMid, -(road_hw + 12.6))
+                        (b_idx.wrapping_mul(7).wrapping_add((b_idx / 23) * 3)) % 23
                     };
-                    let tint = match idx % 6 {
-                        0 => [1.0, 0.98, 0.94, 1.0],
-                        2 => [0.98, 0.92, 0.88, 1.0],
-                        _ => [0.95, 0.94, 0.92, 1.0],
+
+                    let (model, lat_b) = match b_type {
+                        0..=3 => (ModelId::RamblaBuilding(b_type as u8), -(road_hw + 11.4)),
+                        4..=7 => (ModelId::RamblaBuilding(b_type as u8), -(road_hw + 12.2)),
+                        8..=13 => (ModelId::RamblaBuilding(b_type as u8), -(road_hw + 12.8)),
+                        14..=19 => (ModelId::RamblaBuilding(b_type as u8), -(road_hw + 13.5)),
+                        20 => (ModelId::ColonialTownhouse, -(road_hw + 11.4)),
+                        21 => (ModelId::CoastalBuildingMid, -(road_hw + 12.6)),
+                        _ => (ModelId::CoastalBuildingTall, -(road_hw + 13.6)),
+                    };
+                    let tint = match b_idx % 5 {
+                        0 => [1.0, 0.99, 0.96, 1.0],
+                        1 => [0.98, 0.95, 0.91, 1.0],
+                        2 => [0.96, 0.97, 0.98, 1.0],
+                        3 => [0.99, 0.94, 0.90, 1.0],
+                        _ => [0.95, 0.95, 0.93, 1.0],
                     };
                     push_prop(
                         model,
@@ -1024,44 +1085,131 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                         1.0,
                         true,
                     );
+
+                    // Reuse Campo trees & flowering bushes right in front of / between the buildings (garden forecourts)
+                    let v_g = ((b_idx * 3 + 1) % 10) as u8;
+                    let forecourt_pos = s.pos + s.tangent * 4.4 - s.right * (road_hw + 6.2) + Vec3::Y * 0.12;
+                    let garden_tree = match b_idx % 4 {
+                        0 => ModelId::TreeOmbu(v_g),
+                        1 => ModelId::TreeCeibo(v_g),
+                        2 => ModelId::SmallPalm(v_g),
+                        _ => ModelId::TreeEucalyptus(v_g),
+                    };
+                    let g_sc = match b_idx % 4 {
+                        0 => 0.84,
+                        1 => 0.92,
+                        2 => 1.02,
+                        _ => 0.88,
+                    };
+                    push_prop(
+                        garden_tree,
+                        forecourt_pos,
+                        yaw + (b_idx as f32) * 1.3,
+                        Vec3::splat(g_sc),
+                        [1.0; 4],
+                        0.82,
+                        0.0,
+                        true,
+                    );
+                    // Flowering CeiboBush / ChircaBush hedges framing building entrances
+                    let bush_model = if b_idx % 2 == 0 {
+                        ModelId::CeiboBush(v_g)
+                    } else {
+                        ModelId::ChircaBush(v_g)
+                    };
+                    push_prop(
+                        bush_model,
+                        s.pos - s.tangent * 3.2 - s.right * (road_hw + 6.4) + Vec3::Y * 0.10,
+                        yaw + (b_idx as f32) * 0.9,
+                        Vec3::splat(0.85),
+                        [1.0; 4],
+                        0.80,
+                        0.0,
+                        true,
+                    );
                 }
 
-                // Right boardwalk: vintage streetlamps, benches, pedestrians
-                if idx % 2 == 1 {
+                // 3. Right Promenade Street-Edge Row (just like Montevideo's Rambla photo):
+                //    - Benches placed right at the edge of the street (lat = road_hw + 0.98) FACING THE SEA (rotation = yaw)!
+                //    - People sitting on the benches facing the sea (some drinking mate with termo & bombilla!)
+                //    - Curb-side Palm trees & SmallPalms alternating with the street-edge benches and vintage streetlamps!
+                let lat_curb_edge = road_hw + 0.98;
+                if idx % 2 == 0 {
+                    // Bench at the street edge of the promenade facing the sea (+s.right)
+                    let bench_pos = s.pos + s.right * lat_curb_edge + Vec3::Y * 0.18;
+                    push_prop(
+                        ModelId::PromenadeBench,
+                        bench_pos,
+                        yaw,
+                        Vec3::ONE,
+                        [1.0; 4],
+                        0.88,
+                        0.9,
+                        true,
+                    );
+
+                    // Place 1 or 2 seated pedestrians on ~75% of the benches (variants 1 & 3 are drinking mate!)
+                    let bench_slot = idx / 2;
+                    if bench_slot % 4 != 3 {
+                        let sitter_v1 = ((bench_slot * 3 + 1) % 4) as u8;
+                        let off_t1 = if bench_slot % 2 == 0 { -0.36_f32 } else { 0.15_f32 };
+                        push_prop(
+                            ModelId::RamblaSeated(sitter_v1),
+                            bench_pos + s.tangent * off_t1,
+                            yaw,
+                            Vec3::ONE,
+                            [1.0; 4],
+                            0.92,
+                            0.6,
+                            true,
+                        );
+                        // On every even bench, a second person sits beside them sharing mate & looking at the sea
+                        if bench_slot % 2 == 0 {
+                            let sitter_v2 = ((sitter_v1 + 1) % 4) as u8;
+                            push_prop(
+                                ModelId::RamblaSeated(sitter_v2),
+                                bench_pos + s.tangent * 0.38,
+                                yaw,
+                                Vec3::splat(0.98),
+                                [1.0; 4],
+                                0.92,
+                                0.6,
+                                true,
+                            );
+                        }
+                    }
+
+                    // Curb-side Palm tree planted between benches along the street edge (matching the photo!)
+                    let palm_pos = s.pos + s.tangent * 4.75 + s.right * (road_hw + 0.95) + Vec3::Y * 0.16;
+                    let is_tall_palm = (bench_slot % 3) != 2;
+                    let (p_model, p_sc) = if is_tall_palm {
+                        (ModelId::PalmTree, 1.12 + hash_u32(idx * 53) * 0.24)
+                    } else {
+                        (
+                            ModelId::SmallPalm(((bench_slot * 3) % 10) as u8),
+                            1.05 + hash_u32(idx * 59) * 0.18,
+                        )
+                    };
+                    push_prop(
+                        p_model,
+                        palm_pos,
+                        yaw + hash_u32(idx * 61) * 6.28,
+                        Vec3::splat(p_sc),
+                        [1.0; 4],
+                        0.85,
+                        0.0,
+                        true,
+                    );
+                } else {
+                    // Vintage streetlamp along the street edge of the right promenade
                     push_prop(
                         ModelId::Streetlamp,
-                        s.pos + s.right * (road_hw + 1.45) + Vec3::Y * 0.18,
+                        s.pos + s.right * (road_hw + 1.15) + Vec3::Y * 0.18,
                         yaw,
                         Vec3::ONE,
                         [1.0; 4],
                         0.90,
                         0.8,
-                        true,
-                    );
-                }
-                if idx % 3 == 0 {
-                    push_prop(
-                        ModelId::PromenadeBench,
-                        s.pos + s.right * (road_hw + 5.2) + Vec3::Y * 0.18,
-                        yaw + std::f32::consts::FRAC_PI_2,
-                        Vec3::ONE,
-                        [1.0; 4],
-                        0.85,
-                        0.9,
-                        true,
-                    );
-                }
-                if idx % 3 == 1 {
-                    let r = hash_u32(idx * 67);
-                    let lat_ped = road_hw + 2.4 + r * 2.4;
-                    push_prop(
-                        ModelId::Pedestrian,
-                        s.pos + s.right * lat_ped + Vec3::Y * 0.18,
-                        yaw + if r > 0.5 { 0.0 } else { std::f32::consts::PI },
-                        Vec3::ONE,
-                        [1.0; 4],
-                        0.95,
-                        0.6,
                         true,
                     );
                 }

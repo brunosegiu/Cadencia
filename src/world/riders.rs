@@ -625,6 +625,7 @@ pub enum AnimalSpecies {
     Cow,
     Sheep,
     Mulita,
+    RamblaWalker,
 }
 
 impl AnimalSpecies {
@@ -635,6 +636,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => ModelId::Cow(v),
             AnimalSpecies::Sheep => ModelId::Sheep(v),
             AnimalSpecies::Mulita => ModelId::Mulita(v),
+            AnimalSpecies::RamblaWalker => ModelId::RamblaPedestrian(v),
         }
     }
 
@@ -644,6 +646,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 4.0,
             AnimalSpecies::Sheep => 5.0,
             AnimalSpecies::Mulita => 6.0,
+            AnimalSpecies::RamblaWalker => 7.0,
         }
     }
 
@@ -653,6 +656,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 0.84,
             AnimalSpecies::Sheep => 0.78,
             AnimalSpecies::Mulita => 0.56,
+            AnimalSpecies::RamblaWalker => 1.26,
         }
     }
 
@@ -662,6 +666,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 1.22,
             AnimalSpecies::Sheep => 0.78,
             AnimalSpecies::Mulita => 0.32,
+            AnimalSpecies::RamblaWalker => 1.32,
         }
     }
 
@@ -671,6 +676,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 1.04,
             AnimalSpecies::Sheep => 1.04,
             AnimalSpecies::Mulita => 0.36,
+            AnimalSpecies::RamblaWalker => 0.12,
         }
     }
 
@@ -680,6 +686,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 0.38,
             AnimalSpecies::Sheep => 0.45,
             AnimalSpecies::Mulita => 0.52,
+            AnimalSpecies::RamblaWalker => 0.38,
         }
     }
 
@@ -689,6 +696,7 @@ impl AnimalSpecies {
             AnimalSpecies::Cow => 7.5,
             AnimalSpecies::Sheep => 6.5,
             AnimalSpecies::Mulita => 4.2,
+            AnimalSpecies::RamblaWalker => 240.0,
         }
     }
 }
@@ -734,7 +742,7 @@ fn wrap_angle_pi(a: f32) -> f32 {
 }
 
 pub fn spawn_biome_animals(biome: BiomeId, spline: &RouteSpline) -> Vec<DynamicAnimal> {
-    if biome != BiomeId::RollingRuralGravel {
+    if biome != BiomeId::RollingRuralGravel && biome != BiomeId::CoastalPromenade {
         return Vec::new();
     }
 
@@ -778,6 +786,86 @@ pub fn spawn_biome_animals(biome: BiomeId, spline: &RouteSpline) -> Vec<DynamicA
             phase_seed: h1 * 19.0,
         });
     };
+
+    if biome == BiomeId::CoastalPromenade {
+        // 1. Curated foreground/midground Rambla pedestrians (some walking & drinking mate with termo + bombilla!)
+        let pi = std::f32::consts::PI;
+        let hero_walkers: &[(f32, f32, u8, f32, f32, AnimalBehavior)] = &[
+            // Foreground mate-drinker strolling along the right tiled promenade
+            (11.5, road_hw + 2.85, 1, 1.00, 0.0, AnimalBehavior::Walking),
+            // Pair of walkers strolling together (one drinking mate, one in casual coastal attire) coming toward camera
+            (22.0, road_hw + 3.65, 3, 0.99, pi, AnimalBehavior::Walking),
+            (22.6, road_hw + 4.35, 0, 1.01, pi, AnimalBehavior::Walking),
+            // Walker near the seawall admiring the ocean & sipping mate
+            (31.0, road_hw + 5.20, 1, 1.00, 0.0, AnimalBehavior::Walking),
+            // Jogger/walker in sun cap further along the promenade
+            (44.5, road_hw + 2.65, 2, 1.00, 0.0, AnimalBehavior::Walking),
+            (58.0, road_hw + 4.10, 3, 0.98, pi, AnimalBehavior::Walking),
+            // Pedestrians walking on the left building sidewalk under the trees
+            (19.0, -(road_hw + 3.40), 0, 1.00, pi, AnimalBehavior::Walking),
+            (37.5, -(road_hw + 3.15), 1, 1.00, 0.0, AnimalBehavior::Walking),
+        ];
+        for (i, &(d_off, lat_m, var, sc, yaw, beh)) in hero_walkers.iter().enumerate() {
+            push_animal(
+                AnimalSpecies::RamblaWalker,
+                var,
+                hero_d + d_off,
+                lat_m,
+                yaw,
+                sc,
+                beh,
+                5000 + i as u32,
+            );
+        }
+
+        // 2. Continuous Rambla promenade pedestrians around the 1.6 km coastal loop (solo walkers & pairs, ~50% drinking mate)
+        let mut ped_d = 75.0_f32;
+        let mut p_idx = 0_u32;
+        while ped_d < total - 35.0 {
+            let rel_hero = (ped_d - hero_d).rem_euclid(total);
+            if !(0.0..68.0).contains(&rel_hero) {
+                let ps = p_idx.wrapping_mul(137).wrapping_add(31);
+                let r0 = animal_hash(ps);
+                let r1 = animal_hash(ps + 17);
+                let dir_yaw = if r0 > 0.48 { 0.0_f32 } else { pi };
+                let on_right_promenade = p_idx % 5 != 4;
+                let base_lat = if on_right_promenade {
+                    road_hw + 2.25 + r1 * 3.15
+                } else {
+                    -(road_hw + 2.60 + r1 * 1.45)
+                };
+                let var = (p_idx % 4) as u8;
+                push_animal(
+                    AnimalSpecies::RamblaWalker,
+                    var,
+                    ped_d,
+                    base_lat,
+                    dir_yaw,
+                    0.97 + animal_hash(ps + 29) * 0.07,
+                    AnimalBehavior::Walking,
+                    6000 + p_idx * 2,
+                );
+                // Every 3rd encounter is a pair of friends walking side-by-side (one with mate!)
+                if on_right_promenade && p_idx % 3 == 0 {
+                    let pair_lat = (base_lat + 0.72).min(road_hw + 5.55);
+                    push_animal(
+                        AnimalSpecies::RamblaWalker,
+                        ((p_idx + 1) % 4) as u8,
+                        ped_d + 0.45,
+                        pair_lat,
+                        dir_yaw,
+                        0.98 + animal_hash(ps + 43) * 0.06,
+                        AnimalBehavior::Walking,
+                        6001 + p_idx * 2,
+                    );
+                }
+            }
+            ped_d += 24.0 + animal_hash(p_idx * 89 + 11) * 18.0;
+            p_idx += 1;
+        }
+
+        return animals;
+    }
 
     // 1. Curated Hero Vista Animals at hero_start_dist_m:
     // Small, realistic Campo groups (a pair of 2 horses in the mid-meadow, a small mixed group of 2 cows + 1 horse
@@ -911,49 +999,66 @@ pub fn step_animals(
             let r_dur = animal_hash(seed.wrapping_add(17));
             let r_turn = animal_hash(seed.wrapping_add(53));
 
-            a.behavior = match a.behavior {
-                AnimalBehavior::Walking => {
-                    if r_state < 0.62 {
-                        AnimalBehavior::EatingGrass
-                    } else {
-                        AnimalBehavior::Idle
-                    }
-                }
-                AnimalBehavior::EatingGrass => {
-                    if r_state < 0.52 {
-                        AnimalBehavior::Walking
-                    } else {
-                        AnimalBehavior::Idle
-                    }
-                }
-                AnimalBehavior::Idle => {
-                    if r_state < 0.55 {
-                        AnimalBehavior::EatingGrass
-                    } else {
-                        AnimalBehavior::Walking
-                    }
-                }
-            };
-            a.state_timer_s = match a.behavior {
-                AnimalBehavior::Walking => 3.6 + r_dur * 4.8,
-                AnimalBehavior::EatingGrass => 4.2 + r_dur * 5.8,
-                AnimalBehavior::Idle => 2.6 + r_dur * 3.8,
-            };
-
-            // Compute displacement from home anchor so animals stay within their pasture/paddock
-            let mut d_diff = (a.home_dist_m - a.dist_m).rem_euclid(total);
-            if d_diff > 0.5 * total {
-                d_diff -= total;
-            }
-            let lat_diff = a.home_lat_m - a.lat_m;
-            let wander_dist = (d_diff * d_diff + lat_diff * lat_diff).sqrt();
-            if wander_dist > a.species.wander_radius_m() * 0.65 {
-                let to_home_yaw = lat_diff.atan2(d_diff);
-                a.target_rel_yaw = wrap_angle_pi(to_home_yaw + (r_turn - 0.5) * 0.85);
-            } else if a.behavior == AnimalBehavior::Walking {
-                a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 1.9);
+            if a.species == AnimalSpecies::RamblaWalker {
+                // Rambla pedestrians walk along the promenade (85% of the time) and occasionally pause to sip mate / look at the sea
+                a.behavior = if r_state < 0.85 {
+                    AnimalBehavior::Walking
+                } else {
+                    AnimalBehavior::EatingGrass
+                };
+                a.state_timer_s = 5.0 + r_dur * 7.5;
+                // Keep heading parallel to the promenade lane (either ~0.0 forward or ~PI oncoming)
+                let base_dir = if a.rel_yaw.cos() >= 0.0 {
+                    0.0_f32
+                } else {
+                    std::f32::consts::PI
+                };
+                a.target_rel_yaw = wrap_angle_pi(base_dir + (r_turn - 0.5) * 0.08);
             } else {
-                a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 0.55);
+                a.behavior = match a.behavior {
+                    AnimalBehavior::Walking => {
+                        if r_state < 0.62 {
+                            AnimalBehavior::EatingGrass
+                        } else {
+                            AnimalBehavior::Idle
+                        }
+                    }
+                    AnimalBehavior::EatingGrass => {
+                        if r_state < 0.52 {
+                            AnimalBehavior::Walking
+                        } else {
+                            AnimalBehavior::Idle
+                        }
+                    }
+                    AnimalBehavior::Idle => {
+                        if r_state < 0.55 {
+                            AnimalBehavior::EatingGrass
+                        } else {
+                            AnimalBehavior::Walking
+                        }
+                    }
+                };
+                a.state_timer_s = match a.behavior {
+                    AnimalBehavior::Walking => 3.6 + r_dur * 4.8,
+                    AnimalBehavior::EatingGrass => 4.2 + r_dur * 5.8,
+                    AnimalBehavior::Idle => 2.6 + r_dur * 3.8,
+                };
+
+                // Compute displacement from home anchor so animals stay within their pasture/paddock
+                let mut d_diff = (a.home_dist_m - a.dist_m).rem_euclid(total);
+                if d_diff > 0.5 * total {
+                    d_diff -= total;
+                }
+                let lat_diff = a.home_lat_m - a.lat_m;
+                let wander_dist = (d_diff * d_diff + lat_diff * lat_diff).sqrt();
+                if wander_dist > a.species.wander_radius_m() * 0.65 {
+                    let to_home_yaw = lat_diff.atan2(d_diff);
+                    a.target_rel_yaw = wrap_angle_pi(to_home_yaw + (r_turn - 0.5) * 0.85);
+                } else if a.behavior == AnimalBehavior::Walking {
+                    a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 1.9);
+                } else {
+                    a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 0.55);
+                }
             }
         }
 
@@ -987,8 +1092,16 @@ pub fn step_animals(
             let next_lat = a.lat_m + v_lat;
             let home_side = if a.home_lat_m >= 0.0 { 1.0_f32 } else { -1.0_f32 };
 
-            // Keep animal on its side of the road/fence and within outer terrain bounds
-            if home_side > 0.0 {
+            // Keep animal/walker on its side of the road and within safe lateral lane bounds
+            if a.species == AnimalSpecies::RamblaWalker {
+                if home_side > 0.0 {
+                    // Right Rambla promenade walkway: stay clear of street-edge benches (road_hw + 0.98) and seawall (road_hw + 6.5)
+                    a.lat_m = next_lat.clamp(road_hw + 2.05, road_hw + 5.65);
+                } else {
+                    // Left sidewalk walkway: stay between street curb and building facades
+                    a.lat_m = next_lat.clamp(-(road_hw + 4.45), -(road_hw + 2.25));
+                }
+            } else if home_side > 0.0 {
                 if next_lat < min_safe_lat {
                     a.lat_m = min_safe_lat;
                     a.target_rel_yaw = wrap_angle_pi(std::f32::consts::FRAC_PI_4);

@@ -165,6 +165,10 @@ pub enum ModelId {
     Cow(u8),
     Sheep(u8),
     Mulita(u8),
+    // Rambla (Montevideo Coastal Promenade) 20 building types + walking & seated pedestrians (with mate)
+    RamblaBuilding(u8),
+    RamblaPedestrian(u8),
+    RamblaSeated(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,6 +243,7 @@ fn classify_role(id: ModelId, mat_name: &str) -> (MaterialRole, u32) {
             | ModelId::CoastalBuildingTall
             | ModelId::CoastalBuildingMid
             | ModelId::ColonialTownhouse
+            | ModelId::RamblaBuilding(_)
             | ModelId::FencePost
             | ModelId::PromenadeBench => 5,
             _ => 4,
@@ -532,6 +537,36 @@ impl AssetBank {
             (ModelId::Mulita(1), include_bytes!("../assets/models/mulita_1.glb")),
             (ModelId::Mulita(2), include_bytes!("../assets/models/mulita_2.glb")),
             (ModelId::Mulita(3), include_bytes!("../assets/models/mulita_3.glb")),
+            // Rambla 20 distinct Montevideo coastal architectural building types (Blender MCP authored)
+            (ModelId::RamblaBuilding(0), include_bytes!("../assets/models/rambla_building_0.glb")),
+            (ModelId::RamblaBuilding(1), include_bytes!("../assets/models/rambla_building_1.glb")),
+            (ModelId::RamblaBuilding(2), include_bytes!("../assets/models/rambla_building_2.glb")),
+            (ModelId::RamblaBuilding(3), include_bytes!("../assets/models/rambla_building_3.glb")),
+            (ModelId::RamblaBuilding(4), include_bytes!("../assets/models/rambla_building_4.glb")),
+            (ModelId::RamblaBuilding(5), include_bytes!("../assets/models/rambla_building_5.glb")),
+            (ModelId::RamblaBuilding(6), include_bytes!("../assets/models/rambla_building_6.glb")),
+            (ModelId::RamblaBuilding(7), include_bytes!("../assets/models/rambla_building_7.glb")),
+            (ModelId::RamblaBuilding(8), include_bytes!("../assets/models/rambla_building_8.glb")),
+            (ModelId::RamblaBuilding(9), include_bytes!("../assets/models/rambla_building_9.glb")),
+            (ModelId::RamblaBuilding(10), include_bytes!("../assets/models/rambla_building_10.glb")),
+            (ModelId::RamblaBuilding(11), include_bytes!("../assets/models/rambla_building_11.glb")),
+            (ModelId::RamblaBuilding(12), include_bytes!("../assets/models/rambla_building_12.glb")),
+            (ModelId::RamblaBuilding(13), include_bytes!("../assets/models/rambla_building_13.glb")),
+            (ModelId::RamblaBuilding(14), include_bytes!("../assets/models/rambla_building_14.glb")),
+            (ModelId::RamblaBuilding(15), include_bytes!("../assets/models/rambla_building_15.glb")),
+            (ModelId::RamblaBuilding(16), include_bytes!("../assets/models/rambla_building_16.glb")),
+            (ModelId::RamblaBuilding(17), include_bytes!("../assets/models/rambla_building_17.glb")),
+            (ModelId::RamblaBuilding(18), include_bytes!("../assets/models/rambla_building_18.glb")),
+            (ModelId::RamblaBuilding(19), include_bytes!("../assets/models/rambla_building_19.glb")),
+            // Rambla Walking & Bench-Seated Pedestrians (derived from cyclist base mesh, with termo & mate)
+            (ModelId::RamblaPedestrian(0), include_bytes!("../assets/models/rambla_pedestrian_0.glb")),
+            (ModelId::RamblaPedestrian(1), include_bytes!("../assets/models/rambla_pedestrian_1.glb")),
+            (ModelId::RamblaPedestrian(2), include_bytes!("../assets/models/rambla_pedestrian_2.glb")),
+            (ModelId::RamblaPedestrian(3), include_bytes!("../assets/models/rambla_pedestrian_3.glb")),
+            (ModelId::RamblaSeated(0), include_bytes!("../assets/models/rambla_seated_0.glb")),
+            (ModelId::RamblaSeated(1), include_bytes!("../assets/models/rambla_seated_1.glb")),
+            (ModelId::RamblaSeated(2), include_bytes!("../assets/models/rambla_seated_2.glb")),
+            (ModelId::RamblaSeated(3), include_bytes!("../assets/models/rambla_seated_3.glb")),
         ];
         for &(id, bytes) in entries {
             models.insert(id, load_glb(id, bytes));

@@ -219,6 +219,92 @@ fn animate_quadruped(
     return PosedVertex(pos, nrm);
 }
 
+fn animate_biped_pedestrian(
+    pos_in: vec3<f32>,
+    nrm_in: vec3<f32>,
+    pose_r: vec4<f32>,
+    pose_l: vec4<f32>,
+) -> PosedVertex {
+    let walk_phase = pose_r.x;
+    let walk_weight = clamp(pose_r.y, 0.0, 1.0);
+    let sip_weight = clamp(pose_r.z, 0.0, 1.0);
+
+    let anim_time = pose_l.x;
+    let idle_head_yaw = pose_l.y;
+    let leg_swing_amp = pose_l.w;
+
+    var pos = pos_in;
+    var nrm = nrm_in;
+
+    // 1. Upper-body 2-beat walking bounce, gentle lateral hip/shoulder sway, and breathing
+    let above_hip = smoothstep(0.48, 0.94, pos_in.y);
+    let stride_bob = 0.018 * abs(sin(walk_phase)) * walk_weight * above_hip;
+    let stride_sway = 0.010 * cos(walk_phase) * walk_weight * above_hip;
+    let breath = 0.004 * sin(anim_time * 2.1) * above_hip;
+    pos.y += stride_bob + breath;
+    pos.x += stride_sway;
+
+    // 2. Bipedal Anti-Phase Leg Swing & Knee Flexion (hip at y=0.90, knee at y=0.46)
+    let w_leg = 1.0 - smoothstep(0.85, 0.93, pos_in.y);
+    if (w_leg > 0.001) {
+        let is_right = pos_in.x >= 0.0;
+        let phase_off = select(3.14159265, 0.0, is_right);
+        let p_leg = walk_phase + phase_off;
+
+        let hip_ang = sin(p_leg) * leg_swing_amp * walk_weight;
+        // During forward leg swing (cos(p_leg) < 0), bend knee backward (+ang in rot_x_vec moves -Y toward -Z)
+        let swing_lift = max(0.0, -cos(p_leg)) * walk_weight;
+        let knee_ang = swing_lift * leg_swing_amp * 0.90;
+
+        let hip_pivot = vec3<f32>(pos.x, 0.90, 0.0);
+        let rest_knee = vec3<f32>(pos.x, 0.46, 0.0);
+        let posed_knee = hip_pivot + rot_x_vec(rest_knee - hip_pivot, hip_ang);
+
+        let p_upper = hip_pivot + rot_x_vec(pos - hip_pivot, hip_ang);
+        let p_lower = posed_knee + rot_x_vec(pos - rest_knee, hip_ang + knee_ang);
+        let n_upper = rot_x_vec(nrm, hip_ang);
+        let n_lower = rot_x_vec(nrm, hip_ang + knee_ang);
+
+        let w_lower = 1.0 - smoothstep(0.41, 0.51, pos_in.y);
+        let p_leg_posed = mix(p_upper, p_lower, w_lower);
+        let n_leg_posed = normalize(mix(n_upper, n_lower, w_lower));
+
+        pos = mix(pos, p_leg_posed, w_leg);
+        nrm = normalize(mix(nrm, n_leg_posed, w_leg));
+    }
+
+    // 3. Counter-Phase Arm Swing for free walking arms (mate-holding arms at z > 0.11 stay steady!)
+    let w_arm_side = smoothstep(0.15, 0.19, abs(pos_in.x))
+        * smoothstep(0.88, 1.34, pos_in.y)
+        * (1.0 - smoothstep(1.36, 1.44, pos_in.y))
+        * (1.0 - smoothstep(0.08, 0.15, pos_in.z));
+    if (w_arm_side > 0.001) {
+        let is_right = pos_in.x >= 0.0;
+        let arm_phase = walk_phase + select(0.0, 3.14159265, is_right);
+        let arm_ang = sin(arm_phase) * 0.24 * walk_weight;
+        let sh_pivot = vec3<f32>(pos.x, 1.33, 0.0);
+        let p_arm = sh_pivot + rot_x_vec(pos - sh_pivot, arm_ang);
+        let n_arm = rot_x_vec(nrm, arm_ang);
+        pos = mix(pos, p_arm, w_arm_side);
+        nrm = normalize(mix(nrm, n_arm, w_arm_side));
+    }
+
+    // 4. Head Look-Around Yaw & Mate-Sipping / Sea-Gazing Nod (neck pivot at y=1.40)
+    let w_head = smoothstep(1.38, 1.45, pos_in.y);
+    if (w_head > 0.001) {
+        let neck_pivot = vec3<f32>(0.0, 1.40, 0.0);
+        let sip_nod = 0.10 * sip_weight * (0.5 + 0.5 * sin(anim_time * 1.9));
+        let rel_h = pos - neck_pivot;
+        let pitched = rot_x_vec(rel_h, sip_nod);
+        let posed_h = neck_pivot + rot_y_vec(pitched, idle_head_yaw * 0.65);
+        let n_h = rot_y_vec(rot_x_vec(nrm, sip_nod), idle_head_yaw * 0.65);
+        pos = mix(pos, posed_h, w_head);
+        nrm = normalize(mix(nrm, n_h, w_head));
+    }
+
+    return PosedVertex(pos, nrm);
+}
+
 fn animate_upper_body(local_pos: vec3<f32>, anim_phase: f32) -> vec3<f32> {
     let x = local_pos.x;
     let y_bl = -local_pos.z;
@@ -263,7 +349,11 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
     let unpacked_nrm = unpack4x8snorm(v.normal_mat);
     var local_nrm = normalize(unpacked_nrm.xyz);
 
-    if (job.skin_pose_r.w >= 2.5) {
+    if (job.skin_pose_r.w >= 6.5) {
+        let posed = animate_biped_pedestrian(local_pos, local_nrm, job.skin_pose_r, job.skin_pose_l);
+        local_pos = posed.pos;
+        local_nrm = posed.nrm;
+    } else if (job.skin_pose_r.w >= 2.5) {
         let posed = animate_quadruped(local_pos, local_nrm, job.skin_pose_r, job.skin_pose_l);
         local_pos = posed.pos;
         local_nrm = posed.nrm;

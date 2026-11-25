@@ -1602,6 +1602,7 @@ impl LigneClaireRenderer {
                         ModelId::ColonialTownhouse
                             | ModelId::CoastalBuildingTall
                             | ModelId::CoastalBuildingMid
+                            | ModelId::RamblaBuilding(_)
                             | ModelId::RanchHouse
                     );
                     let normal_mat = glam::Mat3::from_mat4(p.transform).inverse().transpose();
