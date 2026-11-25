@@ -362,61 +362,46 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
         local_pos = animate_upper_body(local_pos, anim_phase);
 
         if (job.skin_pose_r.w < 1.5) {
-            let x = local_pos.x;
-            let y_bl = -local_pos.z;
-            let z_bl = local_pos.y;
-            if (!(z_bl > 0.065 || (z_bl > -0.28 && y_bl > 0.16))) {
-                let angles = select(job.skin_pose_l.xyz, job.skin_pose_r.xyz, x >= 0.0);
-                let side = select(-1.0, 1.0, x >= 0.0);
-                let th_ang = angles.x;
-                let ca_ang = angles.y;
-                let fo_ang = angles.z;
+            // Exact Blender-authored leg-chain weight baked in vertex UV.x by Catmull-Clark Subsurf:
+            //   0.0        = upper body / torso / pelvis / arms / wrists / hands (untouched by leg IK)
+            //   0.0 .. 1.0 = smooth hip-to-thigh transition around seated rest pose (REST_TH_ANG = 0.90 rad)
+            //   1.0 .. 2.0 = smooth thigh-to-calf knee transition (REST_CA_ANG = -0.35 rad)
+            //   2.0        = rigid calf & white cycling sock down to rest_ankle
+            //   3.0        = rigid low-cut cycling shoe around rest_ankle
+            let bw_x = unpack2x16float(v.uv).x;
+            if (bw_x > 0.001) {
+                let is_right = local_pos.x >= 0.0;
+                let side = select(-1.0, 1.0, is_right);
+                let angles = select(job.skin_pose_l.xyz, job.skin_pose_r.xyz, is_right);
 
-                // 1. Continuous, Watertight Spherical Hip, Knee & Ankle Skinning:
-                //    - Every smoothstep uses strictly ascending edges (edge0 < edge1)!
-                //    - Above z_bl = hip_top_z: w_hip_thigh = 0 (unrotated pelvis/round glutes anchored on saddle).
-                //    - Across [hip_bot_z, hip_top_z]: pure spherical rotation rot_x_vec(local_pos - rest_hip, th_ang * w_hip_thigh)
-                //      so at z_bl <= hip_bot_z (w_hip_thigh = 1.0) p_pelvis_thigh == p_knee_calf identically (zero gap/chunk!).
-                let rear_w     = smoothstep(-0.08, 0.06, -y_bl);
-                let hip_top_z  = mix(0.055, -0.025, rear_w);
-                let hip_bot_z  = mix(-0.145, -0.215, rear_w);
-                let w_hip_thigh  = 1.0 - smoothstep(hip_bot_z, hip_top_z, z_bl);
-                let w_knee_calf  = 1.0 - smoothstep(-0.485, -0.375, z_bl);
-                // Crisp ankle ball-joint right at the shoe collar [-0.8365, -0.8325] so the white sock (z_bl > -0.834)
-                // stays 100% straight along the tibia (ca_ang) and the shoe (z_bl <= -0.834) rotates rigidly with fo_ang!
-                let w_ankle_foot = 1.0 - smoothstep(-0.8365, -0.8325, z_bl);
+                let d_th = angles.x - 0.90;
+                let d_ca = angles.y - (-0.35);
+                let d_fo = angles.z;
 
-                let rest_hip   = vec3<f32>(side * 0.105,  0.000, 0.0);
-                let rest_knee  = vec3<f32>(side * 0.105, -0.430, 0.0);
-                let rest_ankle = vec3<f32>(side * 0.124, -0.835, 0.0);
+                // Exact seated Blender rest-pose joint positions (in wgpu Y-up, -Z forward):
+                let rest_hip   = vec3<f32>(side * 0.102,  0.000000,  0.000000);
+                let rest_knee  = vec3<f32>(side * 0.102, -0.267292, -0.336829);
+                let rest_ankle = vec3<f32>(side * 0.124, -0.647738, -0.197956);
 
                 let posed_hip   = rest_hip;
-                let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(th_ang), -0.430 * sin(th_ang));
-                let posed_ankle = posed_knee + vec3<f32>(side * 0.019, -0.405 * cos(ca_ang), -0.405 * sin(ca_ang));
+                let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(angles.x), -0.430 * sin(angles.x));
+                let posed_ankle = posed_knee + vec3<f32>(side * 0.022, -0.405 * cos(angles.y), -0.405 * sin(angles.y));
 
-                // Pelvis-to-Thigh pure spherical angle interpolation around rest_hip
-                let eff_th_ang = th_ang * w_hip_thigh;
-                let p_pelvis_thigh = posed_hip + rot_x_vec(local_pos - rest_hip, eff_th_ang);
-                let n_pelvis_thigh = rot_x_vec(local_nrm, eff_th_ang);
-
-                // Thigh-to-Calf spherical angle interpolation around posed_knee
-                let eff_knee_ang = mix(th_ang, ca_ang, w_knee_calf);
-                let p_knee_calf = posed_knee + rot_x_vec(local_pos - rest_knee, eff_knee_ang);
-                let n_knee_calf = rot_x_vec(local_nrm, eff_knee_ang);
-
-                // Calf-to-Foot rigid low-cut shoe rotation around posed_ankle
-                let eff_ankle_ang = mix(ca_ang, fo_ang, w_ankle_foot);
-                let p_ankle_foot = posed_ankle + rot_x_vec(local_pos - rest_ankle, eff_ankle_ang);
-                let n_ankle_foot = rot_x_vec(local_nrm, eff_ankle_ang);
-
-                let w_below_mid_thigh = 1.0 - smoothstep(-0.34, -0.23, z_bl);
-                let w_below_mid_calf  = 1.0 - smoothstep(-0.76, -0.64, z_bl);
-
-                let p_upper_leg = mix(p_pelvis_thigh, p_knee_calf, w_below_mid_thigh);
-                let n_upper_leg = normalize(mix(n_pelvis_thigh, n_knee_calf, w_below_mid_thigh));
-
-                local_pos = mix(p_upper_leg, p_ankle_foot, w_below_mid_calf);
-                local_nrm = normalize(mix(n_upper_leg, n_ankle_foot, w_below_mid_calf));
+                if (bw_x <= 1.0) {
+                    let eff_ang = d_th * bw_x;
+                    local_pos = posed_hip + rot_x_vec(local_pos - rest_hip, eff_ang);
+                    local_nrm = rot_x_vec(local_nrm, eff_ang);
+                } else if (bw_x <= 2.0) {
+                    let w_knee = bw_x - 1.0;
+                    let eff_ang = mix(d_th, d_ca, w_knee);
+                    local_pos = posed_knee + rot_x_vec(local_pos - rest_knee, eff_ang);
+                    local_nrm = rot_x_vec(local_nrm, eff_ang);
+                } else {
+                    let w_ankle = clamp(bw_x - 2.0, 0.0, 1.0);
+                    let eff_ang = mix(d_ca, d_fo, w_ankle);
+                    local_pos = posed_ankle + rot_x_vec(local_pos - rest_ankle, eff_ang);
+                    local_nrm = rot_x_vec(local_nrm, eff_ang);
+                }
             }
         }
     }
