@@ -554,6 +554,8 @@ pub fn build_rider_draw_parts(
 
     // GPS head unit on the out-front stem mount (shares the frame's object_id so no ink line splits them)
     push(out, ModelId::BikeComputer, Mat4::from_translation(BIKE_COMPUTER_MOUNT), 0);
+    // Down-tube bottle + cage (modelled in bike space, so no extra offset)
+    push(out, ModelId::BikeBottleCage, Mat4::IDENTITY, 0);
 
     // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430 thigh, l2 = 0.405 knee-to-low-cut-ankle)
     let hip_y = match pose_mode {

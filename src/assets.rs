@@ -154,6 +154,7 @@ pub enum ModelId {
     BikeWheel,
     BikeCrank,
     BikeComputer,
+    BikeBottleCage,
     RiderTorso,
     RiderHeadHelmet,
     RiderBackpack,
@@ -463,6 +464,7 @@ impl AssetBank {
             (ModelId::BikeWheel, include_bytes!("../assets/models/bike_wheel.glb")),
             (ModelId::BikeCrank, include_bytes!("../assets/models/bike_crank.glb")),
             (ModelId::BikeComputer, include_bytes!("../assets/models/bike_computer.glb")), // Unbranded GPS head unit on an out-front stem mount
+            (ModelId::BikeBottleCage, include_bytes!("../assets/models/bike_bottle_cage.glb")), // Down-tube bottle (jersey-tinted) + cage, authored in bike space
             (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Manifold seated cyclist: aligned neck, flat athletic back, balanced glutes, sculpted wrists & UV leg weights
             (ModelId::RiderHeadHelmet, include_bytes!("../assets/models/rider_head_helmet.glb")), // Sculpted chin & recessed skull-base neck socket
             (ModelId::RiderBackpack, include_bytes!("../assets/models/rider_backpack.glb")),

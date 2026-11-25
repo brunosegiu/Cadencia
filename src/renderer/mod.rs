@@ -2377,7 +2377,7 @@ impl LigneClaireRenderer {
             let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
-                ModelId::BikeFrame | ModelId::BikeCrank | ModelId::BikeComputer => (0.86, 0.0),
+                ModelId::BikeFrame | ModelId::BikeCrank | ModelId::BikeComputer | ModelId::BikeBottleCage => (0.86, 0.0),
                 _ => (0.92, 0.0),
             };
             let is_skinned = rp.skin_pose_r[3] > 0.5;
