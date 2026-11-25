@@ -1,7 +1,8 @@
 use glam::{Mat4, Quat, Vec3};
 
 use crate::assets::ModelId;
-use crate::world::RouteSpline;
+use crate::world::terrain::terrain_offset_y;
+use crate::world::{BiomeId, RouteSpline};
 
 #[derive(Debug, Clone)]
 pub struct RiderProfile {
@@ -308,6 +309,481 @@ pub fn build_rider_draw_parts(
         head_xform,
         4,
     );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimalSpecies {
+    Horse,
+    Cow,
+    Sheep,
+    Mulita,
+}
+
+impl AnimalSpecies {
+    pub fn model_id(self, variant: u8) -> ModelId {
+        let v = variant % 4;
+        match self {
+            AnimalSpecies::Horse => ModelId::Horse(v),
+            AnimalSpecies::Cow => ModelId::Cow(v),
+            AnimalSpecies::Sheep => ModelId::Sheep(v),
+            AnimalSpecies::Mulita => ModelId::Mulita(v),
+        }
+    }
+
+    pub fn skin_mode(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 3.0,
+            AnimalSpecies::Cow => 4.0,
+            AnimalSpecies::Sheep => 5.0,
+            AnimalSpecies::Mulita => 6.0,
+        }
+    }
+
+    pub fn walk_speed_mps(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 1.42,
+            AnimalSpecies::Cow => 0.84,
+            AnimalSpecies::Sheep => 0.78,
+            AnimalSpecies::Mulita => 0.56,
+        }
+    }
+
+    pub fn stride_length_m(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 1.55,
+            AnimalSpecies::Cow => 1.22,
+            AnimalSpecies::Sheep => 0.78,
+            AnimalSpecies::Mulita => 0.32,
+        }
+    }
+
+    pub fn eat_pitch_max_rad(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 1.24,
+            AnimalSpecies::Cow => 1.04,
+            AnimalSpecies::Sheep => 1.04,
+            AnimalSpecies::Mulita => 0.36,
+        }
+    }
+
+    pub fn leg_swing_amp_rad(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 0.48,
+            AnimalSpecies::Cow => 0.38,
+            AnimalSpecies::Sheep => 0.45,
+            AnimalSpecies::Mulita => 0.52,
+        }
+    }
+
+    pub fn wander_radius_m(self) -> f32 {
+        match self {
+            AnimalSpecies::Horse => 9.5,
+            AnimalSpecies::Cow => 7.5,
+            AnimalSpecies::Sheep => 6.5,
+            AnimalSpecies::Mulita => 4.2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimalBehavior {
+    Walking,
+    EatingGrass,
+    Idle,
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamicAnimal {
+    pub species: AnimalSpecies,
+    pub variant: u8,
+    pub home_dist_m: f32,
+    pub home_lat_m: f32,
+    pub dist_m: f32,
+    pub lat_m: f32,
+    pub rel_yaw: f32,
+    pub target_rel_yaw: f32,
+    pub scale: f32,
+    pub behavior: AnimalBehavior,
+    pub state_timer_s: f32,
+    pub walk_phase: f32,
+    pub walk_weight: f32,
+    pub eat_weight: f32,
+    pub anim_time: f32,
+    pub phase_seed: f32,
+}
+
+fn animal_hash(mut x: u32) -> f32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    (x & 0x00FF_FFFF) as f32 / 16_777_215.0
+}
+
+fn wrap_angle_pi(a: f32) -> f32 {
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+pub fn spawn_biome_animals(biome: BiomeId, spline: &RouteSpline) -> Vec<DynamicAnimal> {
+    if biome != BiomeId::RollingRuralGravel {
+        return Vec::new();
+    }
+
+    let total = spline.total_length_m;
+    let hero_d = spline.hero_start_dist_m;
+    let road_hw = biome.road_half_width();
+    let mut animals = Vec::with_capacity(140);
+
+    let mut push_animal = |species: AnimalSpecies,
+                           variant: u8,
+                           dist_m: f32,
+                           lat_m: f32,
+                           rel_yaw: f32,
+                           scale: f32,
+                           behavior: AnimalBehavior,
+                           seed_idx: u32| {
+        let d = dist_m.rem_euclid(total);
+        let h0 = animal_hash(seed_idx * 97 + 13);
+        let h1 = animal_hash(seed_idx * 151 + 29);
+        let (walk_weight, eat_weight) = match behavior {
+            AnimalBehavior::Walking => (1.0, 0.0),
+            AnimalBehavior::EatingGrass => (0.0, 1.0),
+            AnimalBehavior::Idle => (0.0, 0.0),
+        };
+        animals.push(DynamicAnimal {
+            species,
+            variant: variant % 4,
+            home_dist_m: d,
+            home_lat_m: lat_m,
+            dist_m: d,
+            lat_m,
+            rel_yaw: wrap_angle_pi(rel_yaw),
+            target_rel_yaw: wrap_angle_pi(rel_yaw),
+            scale,
+            behavior,
+            state_timer_s: 2.8 + h0 * 5.2,
+            walk_phase: h1 * std::f32::consts::TAU,
+            walk_weight,
+            eat_weight,
+            anim_time: h0 * 12.0,
+            phase_seed: h1 * 19.0,
+        });
+    };
+
+    // 1. Curated Hero Vista Animals at hero_start_dist_m (mix of EatingGrass, Walking, and Idle)
+    let hero_specs: &[(f32, f32, AnimalSpecies, u8, f32, f32, AnimalBehavior)] = &[
+        // Foreground Mulitas foraging & trotting along the grassy roadside bank
+        (6.4, -(road_hw + 0.85), AnimalSpecies::Mulita, 0, 1.25, 0.45, AnimalBehavior::Walking),
+        (11.6, road_hw + 1.05, AnimalSpecies::Mulita, 1, 1.22, -0.85, AnimalBehavior::EatingGrass),
+        (18.0, -(road_hw + 1.90), AnimalSpecies::Mulita, 2, 1.18, 1.20, AnimalBehavior::Walking),
+        // Mid-ground Horses in the open left meadow & right eucalyptus paddock
+        (34.0, -(road_hw + 5.8), AnimalSpecies::Horse, 0, 1.08, 1.25, AnimalBehavior::EatingGrass),
+        (37.5, -(road_hw + 3.8), AnimalSpecies::Horse, 1, 1.08, 0.35, AnimalBehavior::Walking),
+        (41.5, -(road_hw + 8.2), AnimalSpecies::Horse, 2, 1.06, 2.05, AnimalBehavior::EatingGrass),
+        (45.0, -(road_hw + 6.4), AnimalSpecies::Horse, 3, 1.05, -0.45, AnimalBehavior::Idle),
+        (25.0, road_hw + 7.5, AnimalSpecies::Horse, 3, 1.08, -1.25, AnimalBehavior::EatingGrass),
+        (30.5, road_hw + 10.5, AnimalSpecies::Horse, 0, 1.05, -0.55, AnimalBehavior::Walking),
+        // Flock of Sheep on the left grassy slope
+        (27.5, -(road_hw + 7.8), AnimalSpecies::Sheep, 0, 1.12, 0.80, AnimalBehavior::EatingGrass),
+        (29.8, -(road_hw + 9.6), AnimalSpecies::Sheep, 1, 1.10, 1.45, AnimalBehavior::Walking),
+        (31.4, -(road_hw + 7.0), AnimalSpecies::Sheep, 2, 1.12, 1.95, AnimalBehavior::EatingGrass),
+        (33.2, -(road_hw + 10.8), AnimalSpecies::Sheep, 3, 1.08, 0.30, AnimalBehavior::Idle),
+        (35.0, -(road_hw + 8.9), AnimalSpecies::Sheep, 0, 1.10, -0.40, AnimalBehavior::Walking),
+        // Mid-distant Cattle herd on the left rolling pasture hillside
+        (54.0, -(road_hw + 11.5), AnimalSpecies::Cow, 0, 1.10, 1.10, AnimalBehavior::EatingGrass),
+        (58.0, -(road_hw + 15.0), AnimalSpecies::Cow, 1, 1.10, 1.55, AnimalBehavior::Walking),
+        (62.5, -(road_hw + 9.5), AnimalSpecies::Cow, 2, 1.08, 0.45, AnimalBehavior::EatingGrass),
+        (66.0, -(road_hw + 17.5), AnimalSpecies::Cow, 3, 1.10, 2.25, AnimalBehavior::Idle),
+    ];
+
+    for (idx, &(d_off, lat_m, species, variant, sc, rel_yaw, behavior)) in
+        hero_specs.iter().enumerate()
+    {
+        push_animal(
+            species,
+            variant,
+            hero_d + d_off,
+            lat_m,
+            rel_yaw,
+            sc,
+            behavior,
+            idx as u32 + 1,
+        );
+    }
+
+    // 2. Roadside Mulitas foraging along the 1.6 km Campo loop
+    let mut d = 0.0_f32;
+    let mut idx = 0_u32;
+    while d < total {
+        let rel_hero = (d - hero_d).rem_euclid(total);
+        if !(0.0..48.0).contains(&rel_hero) {
+            let r_mul = animal_hash(idx * 157 + 7);
+            if r_mul > 0.87 {
+                let side = if idx % 3 == 0 { 1.0_f32 } else { -1.0_f32 };
+                let lat_m = side * (road_hw + 1.15 + (r_mul - 0.87) * 18.0);
+                let m_var = (idx % 4) as u8;
+                let beh = match idx % 3 {
+                    0 => AnimalBehavior::Walking,
+                    1 => AnimalBehavior::EatingGrass,
+                    _ => AnimalBehavior::Idle,
+                };
+                let yaw = (animal_hash(idx * 61) - 0.5) * 3.0;
+                let sc = 1.12 + (r_mul - 0.87) * 1.4;
+                push_animal(
+                    AnimalSpecies::Mulita,
+                    m_var,
+                    d,
+                    lat_m,
+                    yaw,
+                    sc,
+                    beh,
+                    500 + idx,
+                );
+            }
+        }
+        d += 4.0;
+        idx += 1;
+    }
+
+    // 3. Distributed herds of Horses, Cows, and Sheep flocks across the 1.6 km Campo loop
+    let mut herd_d = 95.0_f32;
+    let mut h_idx = 0_u32;
+    while herd_d < total - 40.0 {
+        let hs = h_idx.wrapping_mul(173).wrapping_add(19);
+        let r0 = animal_hash(hs);
+        let r1 = animal_hash(hs + 13);
+        let side = if h_idx % 2 == 0 { -1.0_f32 } else { 1.0_f32 };
+        let base_lat = side * (road_hw + 6.5 + r0 * 26.0);
+        let herd_kind = h_idx % 3;
+        let (species, members) = match herd_kind {
+            0 => (AnimalSpecies::Horse, 3 + (h_idx % 3)),
+            1 => (AnimalSpecies::Cow, 4 + (h_idx % 4)),
+            _ => (AnimalSpecies::Sheep, 5 + (h_idx % 5)),
+        };
+        for m_i in 0..members {
+            let ms = hs + m_i * 29;
+            let md = (herd_d + (animal_hash(ms + 1) - 0.5) * 11.0).rem_euclid(total);
+            let mlat = base_lat + (animal_hash(ms + 2) - 0.5) * 8.0;
+            let safe_lat = if side < 0.0 {
+                mlat.min(-(road_hw + 2.2))
+            } else {
+                mlat.max(road_hw + 2.2)
+            };
+            let v = ((m_i + h_idx) % 4) as u8;
+            let sc = 0.96 + animal_hash(ms + 3) * 0.16;
+            let yaw = (animal_hash(ms + 4) - 0.5) * std::f32::consts::TAU;
+            let beh = match (h_idx + m_i) % 4 {
+                0 | 1 => AnimalBehavior::EatingGrass,
+                2 => AnimalBehavior::Walking,
+                _ => AnimalBehavior::Idle,
+            };
+            push_animal(species, v, md, safe_lat, yaw, sc, beh, 2000 + ms);
+        }
+        herd_d += 56.0 + r1 * 46.0;
+        h_idx += 1;
+    }
+
+    animals
+}
+
+pub fn step_animals(
+    dt: f32,
+    spline: &RouteSpline,
+    biome: BiomeId,
+    animals: &mut [DynamicAnimal],
+) {
+    if animals.is_empty() {
+        return;
+    }
+    let dt = dt.clamp(0.0, 0.12);
+    let total = spline.total_length_m;
+    let road_hw = biome.road_half_width();
+    let min_safe_lat = road_hw + 1.05;
+
+    for (idx, a) in animals.iter_mut().enumerate() {
+        a.anim_time += dt;
+        a.state_timer_s -= dt;
+
+        if a.state_timer_s <= 0.0 {
+            let seed = ((a.anim_time * 37.0) as u32)
+                .wrapping_add((idx as u32).wrapping_mul(2654435761));
+            let r_state = animal_hash(seed);
+            let r_dur = animal_hash(seed.wrapping_add(17));
+            let r_turn = animal_hash(seed.wrapping_add(53));
+
+            a.behavior = match a.behavior {
+                AnimalBehavior::Walking => {
+                    if r_state < 0.62 {
+                        AnimalBehavior::EatingGrass
+                    } else {
+                        AnimalBehavior::Idle
+                    }
+                }
+                AnimalBehavior::EatingGrass => {
+                    if r_state < 0.52 {
+                        AnimalBehavior::Walking
+                    } else {
+                        AnimalBehavior::Idle
+                    }
+                }
+                AnimalBehavior::Idle => {
+                    if r_state < 0.55 {
+                        AnimalBehavior::EatingGrass
+                    } else {
+                        AnimalBehavior::Walking
+                    }
+                }
+            };
+            a.state_timer_s = match a.behavior {
+                AnimalBehavior::Walking => 3.6 + r_dur * 4.8,
+                AnimalBehavior::EatingGrass => 4.2 + r_dur * 5.8,
+                AnimalBehavior::Idle => 2.6 + r_dur * 3.8,
+            };
+
+            // Compute displacement from home anchor so animals stay within their pasture/paddock
+            let mut d_diff = (a.home_dist_m - a.dist_m).rem_euclid(total);
+            if d_diff > 0.5 * total {
+                d_diff -= total;
+            }
+            let lat_diff = a.home_lat_m - a.lat_m;
+            let wander_dist = (d_diff * d_diff + lat_diff * lat_diff).sqrt();
+            if wander_dist > a.species.wander_radius_m() * 0.65 {
+                let to_home_yaw = lat_diff.atan2(d_diff);
+                a.target_rel_yaw = wrap_angle_pi(to_home_yaw + (r_turn - 0.5) * 0.85);
+            } else if a.behavior == AnimalBehavior::Walking {
+                a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 1.9);
+            } else {
+                a.target_rel_yaw = wrap_angle_pi(a.rel_yaw + (r_turn - 0.5) * 0.55);
+            }
+        }
+
+        // Smoothly blend animation weights between Walking, EatingGrass, and Idle
+        let target_walk = if a.behavior == AnimalBehavior::Walking {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        let target_eat = if a.behavior == AnimalBehavior::EatingGrass {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        a.walk_weight += (target_walk - a.walk_weight) * (dt * 3.2).min(1.0);
+        a.eat_weight += (target_eat - a.eat_weight) * (dt * 2.8).min(1.0);
+
+        // Smoothly steer heading toward target_rel_yaw
+        let yaw_err = wrap_angle_pi(a.target_rel_yaw - a.rel_yaw);
+        let turn_rate = if a.walk_weight > 0.2 { 2.2 } else { 1.1 };
+        a.rel_yaw = wrap_angle_pi(a.rel_yaw + yaw_err * (dt * turn_rate).min(1.0));
+
+        // Advance world position & leg walk cycle phase when walking
+        if a.walk_weight > 0.015 {
+            let speed = a.species.walk_speed_mps() * a.walk_weight;
+            let ds = speed * dt;
+            let v_dist = ds * a.rel_yaw.cos();
+            let v_lat = ds * a.rel_yaw.sin();
+
+            a.dist_m = (a.dist_m + v_dist).rem_euclid(total);
+            let next_lat = a.lat_m + v_lat;
+            let home_side = if a.home_lat_m >= 0.0 { 1.0_f32 } else { -1.0_f32 };
+
+            // Keep animal on its side of the road/fence and within outer terrain bounds
+            if home_side > 0.0 {
+                if next_lat < min_safe_lat {
+                    a.lat_m = min_safe_lat;
+                    a.target_rel_yaw = wrap_angle_pi(std::f32::consts::FRAC_PI_4);
+                } else if next_lat > road_hw + 76.0 {
+                    a.lat_m = road_hw + 76.0;
+                    a.target_rel_yaw = wrap_angle_pi(-std::f32::consts::FRAC_PI_4);
+                } else {
+                    a.lat_m = next_lat;
+                }
+            } else if next_lat > -min_safe_lat {
+                a.lat_m = -min_safe_lat;
+                a.target_rel_yaw = wrap_angle_pi(-std::f32::consts::FRAC_PI_4);
+            } else if next_lat < -(road_hw + 76.0) {
+                a.lat_m = -(road_hw + 76.0);
+                a.target_rel_yaw = wrap_angle_pi(std::f32::consts::FRAC_PI_4);
+            } else {
+                a.lat_m = next_lat;
+            }
+
+            let stride = a.species.stride_length_m().max(0.2);
+            a.walk_phase =
+                (a.walk_phase + (ds / stride) * std::f32::consts::TAU).rem_euclid(std::f32::consts::TAU);
+        }
+    }
+}
+
+pub fn build_animal_draw_parts(
+    biome: BiomeId,
+    spline: &RouteSpline,
+    animals: &[DynamicAnimal],
+    cam_pos: Vec3,
+    out: &mut Vec<RiderPartDraw>,
+) {
+    if animals.is_empty() {
+        return;
+    }
+    let road_hw = biome.road_half_width();
+    let total = spline.total_length_m;
+    let max_dist_sq = 185.0_f32 * 185.0_f32;
+
+    for (idx, a) in animals.iter().enumerate() {
+        let s_c = spline.sample(a.dist_m);
+        let y_c = terrain_offset_y(biome, a.lat_m, a.dist_m, road_hw);
+        let pos_c = s_c.pos + s_c.right * a.lat_m + Vec3::Y * (y_c - 0.025);
+        if pos_c.distance_squared(cam_pos) > max_dist_sq {
+            continue;
+        }
+
+        // Sample terrain 0.55m ahead along the animal's heading so hooves align with hillside slope
+        let step_ahead = 0.55_f32;
+        let d_ahead = (a.dist_m + step_ahead * a.rel_yaw.cos()).rem_euclid(total);
+        let lat_ahead = a.lat_m + step_ahead * a.rel_yaw.sin();
+        let s_f = spline.sample(d_ahead);
+        let y_f = terrain_offset_y(biome, lat_ahead, d_ahead, road_hw);
+        let pos_f = s_f.pos + s_f.right * lat_ahead + Vec3::Y * (y_f - 0.025);
+
+        let fwd_3d = (pos_f - pos_c).normalize_or_zero();
+        let right_3d = Vec3::Y.cross(fwd_3d).normalize_or_zero();
+        let up_3d = fwd_3d.cross(right_3d).normalize_or_zero();
+
+        let transform = Mat4::from_cols(
+            right_3d.extend(0.0),
+            up_3d.extend(0.0),
+            fwd_3d.extend(0.0),
+            pos_c.extend(1.0),
+        ) * Mat4::from_scale(Vec3::splat(a.scale));
+
+        let t = a.anim_time + a.phase_seed;
+        let idle_head_yaw = 0.24 * (t * 0.85).sin() + 0.11 * (t * 1.9).cos();
+
+        out.push(RiderPartDraw {
+            model: a.species.model_id(a.variant),
+            transform,
+            jersey_primary: [1.0; 4],
+            jersey_secondary: [1.0; 4],
+            jersey_accent: [1.0; 4],
+            helmet_color: [1.0; 4],
+            helmet_accent: [1.0; 4],
+            frame_color: [1.0; 4],
+            object_id: 80 + ((idx as u32) % 96),
+            skin_pose_r: [
+                a.walk_phase,
+                a.walk_weight,
+                a.eat_weight,
+                a.species.skin_mode(),
+            ],
+            skin_pose_l: [
+                t,
+                idle_head_yaw,
+                a.species.eat_pitch_max_rad(),
+                a.species.leg_swing_amp_rad(),
+            ],
+        });
+    }
 }
 
 #[allow(dead_code)]

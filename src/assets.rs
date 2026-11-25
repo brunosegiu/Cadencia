@@ -503,7 +503,7 @@ impl AssetBank {
             (ModelId::ChircaBush(7), include_bytes!("../assets/models/chirca_bush_7.glb")),
             (ModelId::ChircaBush(8), include_bytes!("../assets/models/chirca_bush_8.glb")),
             (ModelId::ChircaBush(9), include_bytes!("../assets/models/chirca_bush_9.glb")),
-            // Campo Animals: Horses, Cows, Sheep, Mulitas
+            // Campo Skinned Quadruped Animals (canonical rest-pose GLBs): Horses, Cows, Sheep, Mulitas
             (ModelId::Horse(0), include_bytes!("../assets/models/horse_0.glb")),
             (ModelId::Horse(1), include_bytes!("../assets/models/horse_1.glb")),
             (ModelId::Horse(2), include_bytes!("../assets/models/horse_2.glb")),

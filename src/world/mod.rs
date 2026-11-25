@@ -432,5 +432,59 @@ mod tests {
             sum_y += j[1];
         }
         assert!((sum_x / 8.0).abs() < 0.1 && (sum_y / 8.0).abs() < 0.1);
+
+        // Verify dynamic moving & compute-skinned animals in Campo (Walking, EatingGrass, Idle)
+        let campo_sp = RouteSpline::for_biome(BiomeId::RollingRuralGravel);
+        let mut animals =
+            crate::world::riders::spawn_biome_animals(BiomeId::RollingRuralGravel, &campo_sp);
+        assert!(animals.len() >= 80, "expected >= 80 dynamic Campo animals");
+        assert!(animals
+            .iter()
+            .any(|a| a.behavior == crate::world::riders::AnimalBehavior::Walking));
+        assert!(animals
+            .iter()
+            .any(|a| a.behavior == crate::world::riders::AnimalBehavior::EatingGrass));
+        assert!(animals
+            .iter()
+            .any(|a| a.behavior == crate::world::riders::AnimalBehavior::Idle));
+
+        let init_pos: Vec<(f32, f32, f32)> = animals
+            .iter()
+            .map(|a| (a.dist_m, a.lat_m, a.walk_phase))
+            .collect();
+        for _ in 0..50 {
+            crate::world::riders::step_animals(
+                0.1,
+                &campo_sp,
+                BiomeId::RollingRuralGravel,
+                &mut animals,
+            );
+        }
+        let moved_count = animals
+            .iter()
+            .zip(init_pos.iter())
+            .filter(|(a, (d0, l0, p0))| {
+                (a.dist_m - *d0).abs() > 0.05
+                    || (a.lat_m - *l0).abs() > 0.05
+                    || (a.walk_phase - *p0).abs() > 0.05
+            })
+            .count();
+        assert!(moved_count > 30, "expected walking animals to advance position and walk_phase");
+
+        let hero_s = campo_sp.sample(campo_sp.hero_start_dist_m);
+        let cam_pos = hero_s.pos - hero_s.tangent * 4.5 + Vec3::Y * 2.0;
+        let mut draw_parts = Vec::new();
+        crate::world::riders::build_animal_draw_parts(
+            BiomeId::RollingRuralGravel,
+            &campo_sp,
+            &animals,
+            cam_pos,
+            &mut draw_parts,
+        );
+        assert!(
+            draw_parts.len() >= 15,
+            "expected visible dynamic animals in Campo hero vista"
+        );
+        assert!(draw_parts.iter().all(|p| p.skin_pose_r[3] >= 3.0));
     }
 }

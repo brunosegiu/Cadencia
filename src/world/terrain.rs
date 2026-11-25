@@ -316,7 +316,7 @@ fn hash_u32(mut x: u32) -> f32 {
     (x & 0x00FF_FFFF) as f32 / 16_777_215.0
 }
 
-fn terrain_offset_y(biome: BiomeId, lat: f32, dist_m: f32, road_hw: f32) -> f32 {
+pub fn terrain_offset_y(biome: BiomeId, lat: f32, dist_m: f32, road_hw: f32) -> f32 {
     let w1 = (dist_m * 0.032 + lat * 0.042).sin();
     let w2 = (dist_m * 0.075 - lat * 0.065).cos();
     let w3 = (dist_m * 0.015 + lat * 0.018).sin();
@@ -1227,25 +1227,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                     }
                 }
 
-                // Mulitas (seven-banded armadillos) foraging along the grassy roadside bank
-                let r_mul = hash_u32(idx * 157 + 7);
-                if r_mul > 0.86 {
-                    let side = if idx % 3 == 0 { 1.0 } else { -1.0 };
-                    let lat_m = side * (road_hw + 0.85 + (r_mul - 0.86) * 18.0);
-                    let y_m = terrain_offset_y(biome, lat_m, d, road_hw);
-                    let m_var = (idx % 4) as u8;
-                    push_prop(
-                        ModelId::Mulita(m_var),
-                        s.pos + s.right * lat_m + Vec3::Y * (y_m - 0.02),
-                        yaw + (hash_u32(idx * 61) - 0.5) * 2.6,
-                        Vec3::splat(1.10 + (r_mul - 0.86) * 1.5),
-                        [1.0; 4],
-                        0.88,
-                        0.0,
-                        true,
-                    );
-                }
-
                 d += 4.0;
                 idx += 1;
             }
@@ -1400,7 +1381,8 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 }
             }
 
-            // Curated foreground flora & fauna at hero_start_dist_m so the opening vista matches the picture
+            // Curated foreground flora & boulders at hero_start_dist_m so the opening vista matches the reference illustration
+            // (Dynamic moving & skinned Horses, Cows, Sheep, and Mulitas are spawned via `riders::spawn_biome_animals`)
             for &(d_off, lat_off, model, sc, yaw_off) in &[
                 // Left foreground Ceibo red-flowering bushes & Pampas Cortadera white plumes
                 (8.2_f32, -(road_hw + 1.65), ModelId::CeiboBush(0), 0.86_f32, 0.4_f32),
@@ -1415,25 +1397,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 (15.5, road_hw + 2.35, ModelId::SmallPalm(0), 0.92, 0.3),
                 (18.2, road_hw + 1.45, ModelId::ChircaBush(5), 0.78, 2.2),
                 (23.5, road_hw + 4.80, ModelId::SmallPalm(3), 0.98, 1.4),
-                // Foreground Mulitas foraging on the open grassy verge
-                (6.2, -(road_hw + 0.65), ModelId::Mulita(0), 1.25, 0.5),
-                (11.4, road_hw + 0.88, ModelId::Mulita(1), 1.20, -1.1),
-                // Mid-ground grazing horses in the open left meadow & right eucalyptus paddock
-                (34.0, -(road_hw + 5.8), ModelId::Horse(0), 1.08, 1.3),
-                (37.5, -(road_hw + 3.6), ModelId::Horse(1), 1.08, 0.5),
-                (41.5, -(road_hw + 8.2), ModelId::Horse(2), 1.05, 2.1),
-                (25.0, road_hw + 7.5, ModelId::Horse(3), 1.08, -1.3),
-                (30.5, road_hw + 10.5, ModelId::Horse(0), 1.05, -0.7),
-                // Mid-distant cattle herd on the left rolling pasture hillside
-                (54.0, -(road_hw + 11.5), ModelId::Cow(0), 1.10, 1.1),
-                (58.0, -(road_hw + 15.0), ModelId::Cow(1), 1.10, 1.6),
-                (62.5, -(road_hw + 9.5), ModelId::Cow(2), 1.08, 0.4),
-                (66.0, -(road_hw + 17.5), ModelId::Cow(3), 1.10, 2.3),
-                // Flock of sheep on the grassy slope
-                (27.5, -(road_hw + 7.8), ModelId::Sheep(0), 1.10, 0.8),
-                (29.8, -(road_hw + 9.6), ModelId::Sheep(1), 1.08, 1.5),
-                (31.4, -(road_hw + 7.0), ModelId::Sheep(2), 1.10, 2.0),
-                (33.2, -(road_hw + 10.8), ModelId::Sheep(3), 1.05, 0.3),
             ] {
                 let cd = (hero_d + d_off).rem_euclid(total);
                 let cs = spline.sample(cd);
@@ -1449,49 +1412,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                     0.0,
                     true,
                 );
-            }
-
-            // 5. Distributed herds of Horses, Cows, and Sheep flocks across the entire 1.6 km Campo loop
-            let mut herd_d = 95.0_f32;
-            let mut h_idx = 0_u32;
-            while herd_d < total - 40.0 {
-                let hs = h_idx.wrapping_mul(173).wrapping_add(19);
-                let r0 = hash_u32(hs);
-                let r1 = hash_u32(hs + 13);
-                let side = if h_idx % 2 == 0 { -1.0_f32 } else { 1.0_f32 };
-                let base_lat = side * (road_hw + 6.5 + r0 * 28.0);
-                let herd_kind = h_idx % 3;
-                let members = match herd_kind {
-                    0 => 3 + (h_idx % 3), // Horses
-                    1 => 4 + (h_idx % 4), // Cows
-                    _ => 5 + (h_idx % 5), // Sheep flock
-                };
-                for m_i in 0..members {
-                    let ms = hs + m_i * 29;
-                    let md = (herd_d + (hash_u32(ms + 1) - 0.5) * 11.0).rem_euclid(total);
-                    let mlat = base_lat + (hash_u32(ms + 2) - 0.5) * 8.5;
-                    let s = spline.sample(md);
-                    let my = terrain_offset_y(biome, mlat, md, road_hw);
-                    let v = ((m_i + h_idx) % 4) as u8;
-                    let animal_model = match herd_kind {
-                        0 => ModelId::Horse(v),
-                        1 => ModelId::Cow(v),
-                        _ => ModelId::Sheep(v),
-                    };
-                    let sc = 0.94 + hash_u32(ms + 3) * 0.18;
-                    push_prop(
-                        animal_model,
-                        s.pos + s.right * mlat + Vec3::Y * (my - 0.03),
-                        hash_u32(ms + 4) * 6.28,
-                        Vec3::splat(sc),
-                        [1.0; 4],
-                        0.85,
-                        0.0,
-                        true,
-                    );
-                }
-                herd_d += 52.0 + r1 * 45.0;
-                h_idx += 1;
             }
         }
     }

@@ -7,15 +7,16 @@ use wgpu::util::DeviceExt;
 
 use crate::assets::{AssetBank, MaterialRole, ModelId, SceneVertex};
 use crate::world::riders::{
-    build_rider_draw_parts, AiRider, RiderPartDraw, RiderPoseMode, RiderProfile,
+    build_animal_draw_parts, build_rider_draw_parts, AiRider, DynamicAnimal, RiderPartDraw,
+    RiderPoseMode, RiderProfile,
 };
 use crate::world::terrain::{Frustum, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
-pub const MAX_SKINNED_VERTS: usize = 65536;
-pub const MAX_SKIN_JOBS: usize = 64;
+pub const MAX_SKINNED_VERTS: usize = 131072;
+pub const MAX_SKIN_JOBS: usize = 256;
 pub const MAX_INDIRECT_COMMANDS: usize = 16384;
 
 #[derive(Debug, Clone, Copy)]
@@ -1762,6 +1763,7 @@ impl LigneClaireRenderer {
         player_lean_rad: f32,
         player_profile: &RiderProfile,
         ai_riders: &[AiRider],
+        animals: &[DynamicAnimal],
         camera_mode: CameraMode,
         graphics: &GraphicsSettings,
         time_s: f32,
@@ -2103,8 +2105,8 @@ impl LigneClaireRenderer {
             None
         };
 
-        // 2. Enqueue dynamic Riders (pre-skinned via Compute Shader before rendering!)
-        let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(96);
+        // 2. Enqueue dynamic Riders & Compute-Skinned Quadruped Animals (pre-skinned via Compute Shader before rendering!)
+        let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(192);
         let player_pose = if is_menu {
             RiderPoseMode::MenuStopped
         } else {
@@ -2144,6 +2146,7 @@ impl LigneClaireRenderer {
                 }
             }
         }
+        build_animal_draw_parts(biome, spline, animals, cam_pos, &mut rider_parts);
 
         for rp in &rider_parts {
             let (sec_count, base_bound_r) = match self.models.get(&rp.model) {

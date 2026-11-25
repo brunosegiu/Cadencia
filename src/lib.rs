@@ -20,7 +20,10 @@ use crate::hardware::{HardwareProvider, TelemetrySample, TrainerMode};
 use crate::physics::{compute_draft_factor, step_physics, PhysicsParams, RiderPhysicsState};
 use crate::renderer::{CameraMode, GraphicsSettings, LigneClaireRenderer};
 use crate::ui::{draw_ui, AppScreen, HudState};
-use crate::world::riders::{default_player_profile, spawn_ai_peloton, step_ai_peloton, AiRider, RiderProfile};
+use crate::world::riders::{
+    default_player_profile, spawn_ai_peloton, spawn_biome_animals, step_ai_peloton, step_animals,
+    AiRider, DynamicAnimal, RiderProfile,
+};
 use crate::world::terrain::{build_biome_world, StaticWorldGeometry};
 use crate::world::{BiomeId, RouteSpline};
 
@@ -33,6 +36,7 @@ pub struct CadenceSim {
     pub physics: RiderPhysicsState,
     pub player_profile: RiderProfile,
     pub ai_riders: Vec<AiRider>,
+    pub animals: Vec<DynamicAnimal>,
     pub camera_mode: CameraMode,
     pub graphics_settings: GraphicsSettings,
     pub sim_hw: SimulatedHardware,
@@ -63,6 +67,7 @@ impl CadenceSim {
         );
         let player_profile = default_player_profile();
         let ai_riders = spawn_ai_peloton(spline.hero_start_dist_m, spline.total_length_m);
+        let animals = spawn_biome_animals(biome, &spline);
         let eff_camera = if screen == AppScreen::InGame {
             camera_mode
         } else {
@@ -88,6 +93,7 @@ impl CadenceSim {
             physics,
             player_profile,
             ai_riders,
+            animals,
             camera_mode: eff_camera,
             graphics_settings: GraphicsSettings::default(),
             sim_hw: SimulatedHardware::default(),
@@ -117,6 +123,7 @@ impl CadenceSim {
             start_s.grade_pct,
         );
         self.ai_riders = spawn_ai_peloton(self.spline.hero_start_dist_m, self.spline.total_length_m);
+        self.animals = spawn_biome_animals(self.biome, &self.spline);
     }
 
     pub fn launch_world(&mut self, world: BiomeId, renderer: Option<(&wgpu::Device, &mut LigneClaireRenderer)>) {
@@ -145,6 +152,7 @@ impl CadenceSim {
 
     pub fn tick(&mut self, dt: f32) {
         self.time_s += dt;
+        step_animals(dt, &self.spline, self.biome, &mut self.animals);
         if self.screen != AppScreen::InGame {
             return;
         }
@@ -429,6 +437,7 @@ impl WindowGpuState {
             self.sim.physics.lean_angle_rad,
             &self.sim.player_profile,
             &self.sim.ai_riders,
+            &self.sim.animals,
             self.sim.camera_mode,
             &self.sim.graphics_settings,
             self.sim.time_s,
@@ -747,6 +756,8 @@ pub fn render_headless_screenshot_screen(
     let pixels_per_point = (width as f32 / 1280.0).clamp(0.75, 2.0);
     // Warm up 8 frames so the 8-sample Halton(2, 3) TAA history and egui layout settle cleanly
     for frame_i in 0..8 {
+        sim.time_s += 0.08;
+        step_animals(0.08, &sim.spline, sim.biome, &mut sim.animals);
         sim.last_telemetry = sim.sim_hw.poll_telemetry();
         let raw_input = egui::RawInput {
             time: Some(frame_i as f64 * 0.5),
@@ -803,6 +814,7 @@ pub fn render_headless_screenshot_screen(
             sim.physics.lean_angle_rad,
             &sim.player_profile,
             &sim.ai_riders,
+            &sim.animals,
             sim.camera_mode,
             &sim.graphics_settings,
             sim.time_s,
