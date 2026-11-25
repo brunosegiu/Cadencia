@@ -91,32 +91,35 @@ fn apply_vegetation_sway(world_pos: vec3<f32>, sway_uv: vec2<f32>, time_s: f32) 
     let h2 = fract(sin(seed * 78.2330) * 28461.7193);
     let h3 = fract(sin(seed * 41.6351) * 61539.1847);
 
-    let freq1 = 1.15 + h1 * 0.95;
-    let freq2 = freq1 * 1.618034 + h2 * 0.55; // Golden-ratio harmonic avoids periodic loops
-    let freq3 = 0.41 + h3 * 0.49;             // Slow non-periodic breeze swell envelope
+    // Faster, livelier frequency for small plants/blades (small flex), slower majestic sway for tall trees
+    let size_rate = mix(1.55, 0.88, clamp(flex * 3.5, 0.0, 1.0));
+    let freq1 = (1.55 + h1 * 1.15) * size_rate;
+    let freq2 = freq1 * 1.618034 + h2 * 0.65; // Golden-ratio harmonic avoids periodic loops
+    let freq3 = 0.52 + h3 * 0.58;             // Slow non-periodic breeze swell envelope
 
     let ph1 = h1 * 6.2831853;
     let ph2 = h2 * 6.2831853;
     let ph3 = h3 * 6.2831853;
 
-    // Spatial wind wave + local branch micro-turbulence
-    let wind_wave = dot(world_pos.xz, vec2<f32>(0.085, 0.065));
-    let branch_phase = dot(world_pos, vec3<f32>(1.35, 1.85, 1.45));
-    let gust = 0.72 + 0.28 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
+    // Spatial wind wave + local branch/blade turbulence so individual stems/fronds ripple organically
+    let wind_wave = dot(world_pos.xz, vec2<f32>(0.095, 0.075));
+    let branch_phase = dot(world_pos, vec3<f32>(2.15, 2.65, 2.25));
+    let gust = 0.85 + 0.35 * sin(time_s * freq3 + ph3 + wind_wave * 0.45);
 
-    let sway_a = (0.64 * sin(time_s * freq1 + ph1 + wind_wave)
-                + 0.26 * sin(time_s * freq2 + ph2)
-                + 0.10 * sin(time_s * (freq2 * 1.45) + branch_phase)) * gust;
-    let sway_b = (0.58 * cos(time_s * (freq1 * 0.89) + ph2 + wind_wave)
-                + 0.42 * sin(time_s * (freq2 * 1.13) + ph3 + branch_phase * 0.5)) * gust;
+    let sway_a = (0.72 * sin(time_s * freq1 + ph1 + wind_wave)
+                + 0.34 * sin(time_s * freq2 + ph2)
+                + 0.22 * sin(time_s * (freq2 * 1.42) + branch_phase)) * gust;
+    let sway_b = (0.64 * cos(time_s * (freq1 * 0.91) + ph2 + wind_wave)
+                + 0.44 * sin(time_s * (freq2 * 1.17) + ph3 + branch_phase * 0.6)) * gust;
+    let flutter_y = 0.24 * sin(time_s * (freq2 * 1.35) + branch_phase + ph1) * flex;
 
-    let dir_ang = 0.55 + (h3 - 0.5) * 1.15;
+    let dir_ang = 0.55 + (h3 - 0.5) * 1.25;
     let dir_x = cos(dir_ang);
     let dir_z = sin(dir_ang);
 
-    let dx = (dir_x * sway_a - dir_z * sway_b * 0.45) * flex;
-    let dz = (dir_z * sway_a + dir_x * sway_b * 0.45) * flex;
-    let dy = -0.16 * (abs(dx) + abs(dz));
+    let dx = (dir_x * sway_a - dir_z * sway_b * 0.52) * flex;
+    let dz = (dir_z * sway_a + dir_x * sway_b * 0.52) * flex;
+    let dy = flutter_y - 0.14 * (abs(dx) + abs(dz));
     return world_pos + vec3<f32>(dx, dy, dz);
 }
 

@@ -1613,43 +1613,44 @@ impl LigneClaireRenderer {
                                 | ModelId::TreeEucalyptus(_)
                                 | ModelId::TreeOmbu(_)
                                 | ModelId::TreeCeibo(_) => {
-                                    let h_norm = ((local_y - 0.35).max(0.0) / 5.2).clamp(0.0, 1.35);
+                                    let h_norm = ((local_y - 0.30).max(0.0) / 4.2).clamp(0.0, 1.45);
                                     let leaf_boost = if mat_type == 2 {
-                                        1.0 + 0.38 * (r_xz / 2.2).clamp(0.0, 1.0)
+                                        1.15 + 0.55 * (r_xz / 1.8).clamp(0.0, 1.2)
                                     } else {
-                                        0.52
+                                        0.45
                                     };
-                                    0.078 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
+                                    0.24 * (h_norm * h_norm.sqrt()) * leaf_boost * scale_factor
                                 }
                                 ModelId::PalmTree | ModelId::SmallPalm(_) => {
-                                    let h_norm = ((local_y - 0.15).max(0.0) / 2.5).clamp(0.0, 1.4);
-                                    let frond_out = (r_xz / 1.35).clamp(0.0, 1.3);
-                                    0.060
-                                        * (h_norm * 0.52 + frond_out * h_norm * 0.78)
+                                    let h_norm = ((local_y - 0.12).max(0.0) / 1.8).clamp(0.0, 1.45);
+                                    let frond_out = (r_xz / 1.05).clamp(0.0, 1.4);
+                                    0.22
+                                        * (h_norm * 0.45 + frond_out * h_norm.sqrt() * 0.95)
                                         * scale_factor
                                 }
                                 ModelId::PampasCortadera(_) => {
-                                    let h_norm = (local_y / 1.75).clamp(0.0, 1.3);
-                                    let blade_out = (r_xz / 0.85).clamp(0.0, 1.25);
-                                    0.064
-                                        * (h_norm * h_norm
-                                            + blade_out * (local_y / 0.55).clamp(0.0, 1.0) * 0.58)
+                                    let h_norm = (local_y / 1.45).clamp(0.0, 1.4);
+                                    let blade_out = (r_xz / 0.65).clamp(0.0, 1.35);
+                                    // Both the arching grass blades (high blade_out) and tall plumes (high h_norm) sway visibly
+                                    0.22
+                                        * (h_norm * h_norm * 0.85
+                                            + blade_out * (local_y / 0.28).clamp(0.0, 1.0) * 0.75)
                                         * scale_factor
                                 }
                                 ModelId::ChircaBush(_)
                                 | ModelId::CeiboBush(_)
                                 | ModelId::BushCluster => {
-                                    let h_norm = ((local_y - 0.04).max(0.0) / 1.30).clamp(0.0, 1.25);
-                                    let out_norm = (r_xz / 0.85).clamp(0.0, 1.25);
-                                    0.046 * (h_norm * (0.65 + 0.45 * out_norm)) * scale_factor
+                                    let h_norm = ((local_y - 0.03).max(0.0) / 0.95).clamp(0.0, 1.35);
+                                    let out_norm = (r_xz / 0.65).clamp(0.0, 1.35);
+                                    0.18 * (h_norm * (0.65 + 0.65 * out_norm)) * scale_factor
                                 }
                                 ModelId::WildflowerTuft => {
-                                    let h_norm = (local_y / 0.36).clamp(0.0, 1.25);
-                                    0.030 * (h_norm * h_norm) * scale_factor
+                                    let h_norm = (local_y / 0.26).clamp(0.0, 1.35);
+                                    0.11 * h_norm * scale_factor
                                 }
                                 ModelId::Flagpole => {
                                     if r_xz > 0.11 && local_y > 2.5 {
-                                        0.045 * ((r_xz - 0.10) / 1.1).clamp(0.0, 1.2) * scale_factor
+                                        0.16 * ((r_xz - 0.10) / 1.0).clamp(0.0, 1.3) * scale_factor
                                     } else {
                                         0.0
                                     }

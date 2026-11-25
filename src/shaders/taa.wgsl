@@ -187,11 +187,11 @@ fn fs_taa(in: TaaOut) -> TaaFragOut {
             let sigma = sqrt(max(m2 * (1.0 / 9.0) - mu * mu, vec3<f32>(0.0)));
 
             let obj_id_raw = textureLoad(normal_tex, p, 0).a * 255.0;
-            let is_dynamic_rider = obj_id_raw >= 179.5;
+            let is_dynamic_actor = obj_id_raw >= 19.5;
             let vel_px = length(velocity_uv * taa.screen_params.xy);
 
             var gamma = mix(1.30, 0.85, clamp(vel_px * 0.15, 0.0, 1.0));
-            if (is_dynamic_rider) {
+            if (is_dynamic_actor) {
                 gamma = min(gamma, 0.88);
             }
 
@@ -202,7 +202,7 @@ fn fs_taa(in: TaaOut) -> TaaFragOut {
 
             // 4. Luminance-weighted temporal accumulation
             var alpha = taa.camera_params.z + clamp(vel_px * 0.015, 0.0, 0.14);
-            if (is_dynamic_rider) {
+            if (is_dynamic_actor) {
                 alpha = max(alpha, 0.17);
             }
             let w_curr = alpha / (1.0 + max(curr_ycc.x, 0.0));
