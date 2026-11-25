@@ -550,19 +550,30 @@ pub fn build_rider_draw_parts(
             0.275 - 0.165 * th.sin(),
             0.070 - 0.165 * th.cos(),
         );
-        // Natural biomechanical ankling pitch: slight heel drop on power stroke, slight toe dip on top recovery
-        let foot_ang = -0.14 * th.sin() + 0.08 * th.cos();
-        // In the remodeled low-cut shoe, rest_ankle is at y_local = -0.835 and the ball of the sole is at y_local = -0.908, z_local = -0.085
-        // (i.e. offset (0, -0.073, -0.085) from the ankle pivot). Positioning the ankle by subtracting that rotated ball offset
-        // places the ball of the shoe sole cleanly ON TOP of the pedal platform at every crank angle!
-        let (sf, cf) = foot_ang.sin_cos();
-        let ball_from_ankle = Vec3::new(
-            0.0,
-            -0.073 * cf - (-0.085) * sf,
-            -0.073 * sf + (-0.085) * cf,
-        );
-        let ankle = pedal + Vec3::new(0.0, 0.018, 0.0) - ball_from_ankle;
-        solve_ik_target(hip, ankle, foot_ang)
+        // Biomechanical cycling ankling:
+        // Remember in skinning.wgsl rot_x_vec, positive foot_ang pitches the TOE UP (dorsiflexion) and
+        // negative foot_ang pitches the TOE DOWN (plantarflexion). The interior shin-to-foot angle is
+        // (90 deg + calf_ang - foot_ang). When the leg is UP (top of stroke), calf_ang is strongly negative
+        // (~-45..-55 deg), so foot_ang MUST stay negative (toes dipped down) and strictly bounded by
+        // `foot_ang <= calf_ang + 0.38` so the interior ankle angle never collapses narrower than ~68 degrees!
+        let base_foot_ang = -0.16 + 0.10 * th.sin() - 0.06 * th.cos();
+        let ankle_for_pitch = |f_ang: f32| -> Vec3 {
+            let (sf, cf) = f_ang.sin_cos();
+            let ball_from_ankle = Vec3::new(
+                0.0,
+                -0.073 * cf - (-0.085) * sf,
+                -0.073 * sf + (-0.085) * cf,
+            );
+            pedal + Vec3::new(0.0, 0.018, 0.0) - ball_from_ankle
+        };
+        // 2-pass fixed-point solve so foot_ang respects anatomical shin-to-foot dorsiflexion limit
+        let pass1 = solve_ik_target(hip, ankle_for_pitch(base_foot_ang), base_foot_ang);
+        let calf_ang_est = pass1[1];
+        let clamped_foot_ang = base_foot_ang
+            .min(calf_ang_est + 0.36) // keeps shin-to-foot interior angle >= 69 deg even at top-dead-center!
+            .max(calf_ang_est - 0.65)
+            .clamp(-0.56, 0.05);
+        solve_ik_target(hip, ankle_for_pitch(clamped_foot_ang), clamped_foot_ang)
     };
     let ang_r = solve_leg_angles(1.0, 0.0);
     let ang_l = match pose_mode {

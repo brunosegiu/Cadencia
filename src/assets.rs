@@ -375,7 +375,7 @@ impl AssetBank {
             (ModelId::BikeFrame, include_bytes!("../assets/models/bike_frame.glb")),
             (ModelId::BikeWheel, include_bytes!("../assets/models/bike_wheel.glb")),
             (ModelId::BikeCrank, include_bytes!("../assets/models/bike_crank.glb")),
-            (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Remodeled glutes, zero-cut wrist/hands, straight sock & pedal-aligned shoes
+            (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Remodeled glutes, hood-gripping handshake hands, straight sock & pedal-aligned shoes
             (ModelId::RiderHeadHelmet, include_bytes!("../assets/models/rider_head_helmet.glb")), // Remodeled smooth chin & tucked submental throat
             (ModelId::RiderBackpack, include_bytes!("../assets/models/rider_backpack.glb")),
             (ModelId::RiderThigh, include_bytes!("../assets/models/rider_thigh.glb")),
