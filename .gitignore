@@ -4,3 +4,4 @@
 *.apk
 *.idsig
 screenshots/capture.png
+/dist
