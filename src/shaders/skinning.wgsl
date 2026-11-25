@@ -365,45 +365,73 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
             let x = local_pos.x;
             let y_bl = -local_pos.z;
             let z_bl = local_pos.y;
-            if (!(z_bl > 0.045 || (z_bl > -0.14 && y_bl > 0.15))) {
+            if (!(z_bl > 0.065 || (z_bl > -0.28 && y_bl > 0.16))) {
                 let angles = select(job.skin_pose_l.xyz, job.skin_pose_r.xyz, x >= 0.0);
                 let side = select(-1.0, 1.0, x >= 0.0);
                 let th_ang = angles.x;
                 let ca_ang = angles.y;
                 let fo_ang = angles.z;
 
-                // Anatomical hip crease: keeps full round buttcheeks (y_bl < -0.03) anchored on the saddle!
-                let hip_fold_z   = -0.015 + clamp(y_bl * 0.45, -0.045, 0.030);
-                let w_hip_thigh  = 1.0 - smoothstep(hip_fold_z - 0.045, hip_fold_z + 0.030, z_bl);
-                let w_pelvis     = 1.0 - w_hip_thigh;
+                // 1. Volume-Preserving Spherical Hip, Knee & Ankle Skinning:
+                //    - Rear glute cheek (y_bl < 0) keeps its cross-sectional backward projection while the bone
+                //      centerline curves smoothly into the thigh, forming a continuous round C-curve on the butt!
+                //    - Front hip crease (y_bl > 0) uses a damped cross-sectional ring tilt near z_bl ~ 0 so lower thigh
+                //      vertices never swing upward past the abdomen (zero self-intersection or pinching!).
+                //    - Ankle transition sits inside the low-cut shoe collar [-0.842, -0.818] around rest_ankle.y = -0.835
+                //      so the white sock stays aligned with the shin and the entire low-cut shoe rotates rigidly with fo_ang!
+                let rear_blend = smoothstep(-0.01, -0.10, y_bl);
+                let hip_top_z  = mix(0.035, -0.025, rear_blend);
+                let hip_bot_z  = mix(-0.115, -0.210, rear_blend);
+                let w_hip_thigh  = 1.0 - smoothstep(hip_bot_z, hip_top_z, z_bl);
                 let w_knee_calf  = 1.0 - smoothstep(-0.485, -0.375, z_bl);
-                let w_ankle_foot = 1.0 - smoothstep(-0.865, -0.815, z_bl);
-
-                let wt_pelvis = w_pelvis;
-                let wt_thigh  = w_hip_thigh * (1.0 - w_knee_calf);
-                let wt_calf   = w_hip_thigh * w_knee_calf * (1.0 - w_ankle_foot);
-                let wt_foot   = w_hip_thigh * w_knee_calf * w_ankle_foot;
+                // Crisp ankle ball-joint right at the shoe collar [-0.836, -0.832] so the white sock (z_bl > -0.834)
+                // stays 100% straight along the tibia (ca_ang) and the shoe (z_bl <= -0.834) rotates rigidly with fo_ang!
+                let w_ankle_foot = 1.0 - smoothstep(-0.8365, -0.8325, z_bl);
 
                 let rest_hip   = vec3<f32>(side * 0.105,  0.000, 0.0);
                 let rest_knee  = vec3<f32>(side * 0.105, -0.430, 0.0);
-                let rest_ankle = vec3<f32>(side * 0.105, -0.845, 0.0);
+                let rest_ankle = vec3<f32>(side * 0.124, -0.835, 0.0);
 
                 let posed_hip   = rest_hip;
                 let posed_knee  = posed_hip  + vec3<f32>(0.0, -0.430 * cos(th_ang), -0.430 * sin(th_ang));
-                let posed_ankle = posed_knee + vec3<f32>(0.0, -0.415 * cos(ca_ang), -0.415 * sin(ca_ang));
+                let posed_ankle = posed_knee + vec3<f32>(side * 0.019, -0.405 * cos(ca_ang), -0.405 * sin(ca_ang));
 
-                let p_pelvis = local_pos;
-                let p_thigh  = posed_hip   + rot_x_vec(local_pos - rest_hip,   th_ang);
-                let p_calf   = posed_knee  + rot_x_vec(local_pos - rest_knee,  ca_ang);
-                let p_foot   = posed_ankle + rot_x_vec(local_pos - rest_ankle, fo_ang);
+                // Pelvis-to-Thigh spherical angle interpolation
+                let eff_th_ang = th_ang * w_hip_thigh;
+                // Damping cross-sectional ring tilt near the hip joint:
+                // - On the front (y_bl > 0): prevents the front thigh surface from swinging upward into the belly
+                // - On the back (y_bl < 0): keeps the lower glute cross-section pointing backward (-Y_bl) so the
+                //   underside of the butt stays full and round instead of swinging forward under the femur head!
+                let ring_tilt_scale = select(
+                    mix(0.28, 1.0, smoothstep(-0.04, -0.22, z_bl)),
+                    mix(0.32, 1.0, smoothstep(-0.01, -0.14, z_bl)),
+                    y_bl > 0.0
+                );
+                let axis_pt = vec3<f32>(rest_hip.x, local_pos.y, 0.0);
+                let ring_off = local_pos - axis_pt;
+                let p_pelvis_thigh = posed_hip
+                    + rot_x_vec(axis_pt - rest_hip, eff_th_ang)
+                    + rot_x_vec(ring_off, eff_th_ang * ring_tilt_scale);
+                let n_pelvis_thigh = rot_x_vec(local_nrm, eff_th_ang * ring_tilt_scale);
 
-                let n_pelvis = local_nrm;
-                let n_thigh  = rot_x_vec(local_nrm, th_ang);
-                let n_calf   = rot_x_vec(local_nrm, ca_ang);
-                let n_foot   = rot_x_vec(local_nrm, fo_ang);
+                // Thigh-to-Calf spherical angle interpolation around posed_knee
+                let eff_knee_ang = mix(th_ang, ca_ang, w_knee_calf);
+                let p_knee_calf = posed_knee + rot_x_vec(local_pos - rest_knee, eff_knee_ang);
+                let n_knee_calf = rot_x_vec(local_nrm, eff_knee_ang);
 
-                local_pos = wt_pelvis * p_pelvis + wt_thigh * p_thigh + wt_calf * p_calf + wt_foot * p_foot;
-                local_nrm = normalize(wt_pelvis * n_pelvis + wt_thigh * n_thigh + wt_calf * n_calf + wt_foot * n_foot);
+                // Calf-to-Foot rigid low-cut shoe rotation around posed_ankle
+                let eff_ankle_ang = mix(ca_ang, fo_ang, w_ankle_foot);
+                let p_ankle_foot = posed_ankle + rot_x_vec(local_pos - rest_ankle, eff_ankle_ang);
+                let n_ankle_foot = rot_x_vec(local_nrm, eff_ankle_ang);
+
+                let w_below_mid_thigh = 1.0 - smoothstep(-0.34, -0.23, z_bl);
+                let w_below_mid_calf  = 1.0 - smoothstep(-0.76, -0.64, z_bl);
+
+                let p_upper_leg = mix(p_pelvis_thigh, p_knee_calf, w_below_mid_thigh);
+                let n_upper_leg = normalize(mix(n_pelvis_thigh, n_knee_calf, w_below_mid_thigh));
+
+                local_pos = mix(p_upper_leg, p_ankle_foot, w_below_mid_calf);
+                local_nrm = normalize(mix(n_upper_leg, n_ankle_foot, w_below_mid_calf));
             }
         }
     }

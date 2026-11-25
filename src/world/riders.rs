@@ -523,14 +523,14 @@ pub fn build_rider_draw_parts(
     let crank_rot = Mat4::from_rotation_x(-eff_crank_rad);
     push(out, ModelId::BikeCrank, Mat4::from_translation(Vec3::new(0.0, 0.275, 0.070)) * crank_rot, 0);
 
-    // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430, l2 = 0.415)
+    // Solve 2-bone analytical leg IK for RiderArmature skinning (l1 = 0.430 thigh, l2 = 0.405 knee-to-low-cut-ankle)
     let hip_y = match pose_mode {
         RiderPoseMode::Pedaling => 0.965_f32,
         RiderPoseMode::MenuStopped => 0.885_f32,
     };
     let hip_center = Vec3::new(0.0, hip_y, 0.235);
     let l1 = 0.430_f32;
-    let l2 = 0.415_f32;
+    let l2 = 0.405_f32;
     let solve_ik_target = |hip: Vec3, ankle: Vec3, foot_ang: f32| -> [f32; 3] {
         let d_vec = ankle - hip;
         let d = d_vec.length().clamp(0.12, l1 + l2 - 0.002);
@@ -550,8 +550,18 @@ pub fn build_rider_draw_parts(
             0.275 - 0.165 * th.sin(),
             0.070 - 0.165 * th.cos(),
         );
-        let ankle = pedal + Vec3::new(0.0, 0.056, 0.035);
-        let foot_ang = 0.10 * th.cos();
+        // Natural biomechanical ankling pitch: slight heel drop on power stroke, slight toe dip on top recovery
+        let foot_ang = -0.14 * th.sin() + 0.08 * th.cos();
+        // In the remodeled low-cut shoe, rest_ankle is at y_local = -0.835 and the ball of the sole is at y_local = -0.908, z_local = -0.085
+        // (i.e. offset (0, -0.073, -0.085) from the ankle pivot). Positioning the ankle by subtracting that rotated ball offset
+        // places the ball of the shoe sole cleanly ON TOP of the pedal platform at every crank angle!
+        let (sf, cf) = foot_ang.sin_cos();
+        let ball_from_ankle = Vec3::new(
+            0.0,
+            -0.073 * cf - (-0.085) * sf,
+            -0.073 * sf + (-0.085) * cf,
+        );
+        let ankle = pedal + Vec3::new(0.0, 0.018, 0.0) - ball_from_ankle;
         solve_ik_target(hip, ankle, foot_ang)
     };
     let ang_r = solve_leg_angles(1.0, 0.0);
@@ -560,7 +570,7 @@ pub fn build_rider_draw_parts(
         RiderPoseMode::MenuStopped => {
             // Left leg extended straight down past the bottom bracket with shoe planted flat on the ground!
             let hip_l = Vec3::new(-0.105, hip_y, 0.235);
-            let ground_ankle_l = Vec3::new(-0.105, 0.054, 0.205);
+            let ground_ankle_l = Vec3::new(-0.105, 0.073, 0.205);
             solve_ik_target(hip_l, ground_ankle_l, 0.0)
         }
     };
@@ -611,11 +621,13 @@ pub fn build_rider_draw_parts(
         -0.015 + head_fwd_z,
     )) * Mat4::from_euler(glam::EulerRot::YXZ, head_yaw, head_pitch, head_roll);
 
+    // Share object_id (+2) with RiderTorso so the post-processing outline shader never draws an artificial
+    // horizontal object_id seam line across the middle of the bare skin neck!
     push(
         out,
         ModelId::RiderHeadHelmet,
         head_xform,
-        4,
+        2,
     );
 }
 
