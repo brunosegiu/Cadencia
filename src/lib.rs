@@ -171,14 +171,17 @@ impl CadenceSim {
         self.last_telemetry = sample.clone();
 
         let route_s = self.spline.sample(self.physics.distance_m);
+        let player_lat_m = self.biome.player_lane_lat_m();
+        // Only same-direction riders provide aerodynamic drafting benefit
         let others: Vec<(f32, f32)> = self
             .ai_riders
             .iter()
+            .filter(|r| r.direction > 0.0)
             .map(|r| (r.distance_m, r.lateral_m))
             .collect();
         let draft = compute_draft_factor(
             self.physics.distance_m,
-            0.0,
+            player_lat_m,
             &others,
             self.spline.total_length_m,
         );
@@ -194,7 +197,13 @@ impl CadenceSim {
             &self.physics_params,
             &mut self.physics,
         );
-        step_ai_peloton(dt, &self.spline, &mut self.ai_riders);
+        step_ai_peloton(
+            dt,
+            &self.spline,
+            self.physics.distance_m,
+            player_lat_m,
+            &mut self.ai_riders,
+        );
 
         let mode = if self.sim_hw.erg_mode {
             TrainerMode::Erg {
@@ -431,7 +440,7 @@ impl WindowGpuState {
             &self.sim.spline,
             &self.sim.world_geo,
             self.sim.physics.distance_m,
-            0.0,
+            self.sim.biome.player_lane_lat_m(),
             self.sim.physics.wheel_angle_rad,
             self.sim.physics.crank_angle_rad,
             self.sim.physics.lean_angle_rad,
@@ -808,7 +817,7 @@ pub fn render_headless_screenshot_screen(
             &sim.spline,
             &sim.world_geo,
             sim.physics.distance_m,
-            0.0,
+            sim.biome.player_lane_lat_m(),
             sim.physics.wheel_angle_rad,
             sim.physics.crank_angle_rad,
             sim.physics.lean_angle_rad,

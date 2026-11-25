@@ -89,6 +89,15 @@ impl BiomeId {
         }
     }
 
+    /// Lateral offset (in meters, positive = right side of the road) for the main player cyclist.
+    pub fn player_lane_lat_m(self) -> f32 {
+        match self {
+            BiomeId::MountainClimb => 1.15,
+            BiomeId::CoastalPromenade => 1.65,
+            BiomeId::RollingRuralGravel => 1.05,
+        }
+    }
+
     pub fn crr(self) -> f32 {
         match self {
             BiomeId::MountainClimb => 0.0055,
@@ -491,5 +500,39 @@ mod tests {
             draw_parts.len()
         );
         assert!(draw_parts.iter().all(|p| p.skin_pose_r[3] >= 3.0));
+
+        // Verify main player rider is always on the right side of the road and AI cyclists include
+        // both same-direction and opposite-direction solo riders and cycling groups (~2 encounters/min)
+        for &b in &BiomeId::ALL {
+            assert!(
+                b.player_lane_lat_m() > 0.8 && b.player_lane_lat_m() < b.road_half_width(),
+                "expected right-lane player offset for {:?}",
+                b
+            );
+        }
+        let mut ai = crate::world::riders::spawn_ai_peloton(
+            campo_sp.hero_start_dist_m,
+            campo_sp.total_length_m,
+        );
+        assert!(ai.iter().any(|r| r.direction > 0.0 && r.group_id == 0));
+        assert!(ai.iter().any(|r| r.direction < 0.0 && r.group_id == 0));
+        assert!(ai.iter().any(|r| r.direction > 0.0 && r.group_id > 0));
+        assert!(ai.iter().any(|r| r.direction < 0.0 && r.group_id > 0));
+        assert!(ai.iter().filter(|r| r.direction > 0.0).all(|r| r.lateral_m > 0.0));
+        assert!(ai.iter().filter(|r| r.direction < 0.0).all(|r| r.lateral_m < 0.0));
+
+        let d0_fwd = ai.iter().find(|r| r.direction > 0.0).unwrap().distance_m;
+        let d0_rev = ai.iter().find(|r| r.direction < 0.0).unwrap().distance_m;
+        crate::world::riders::step_ai_peloton(
+            0.1,
+            &campo_sp,
+            campo_sp.hero_start_dist_m,
+            BiomeId::RollingRuralGravel.player_lane_lat_m(),
+            &mut ai,
+        );
+        let d1_fwd = ai.iter().find(|r| r.direction > 0.0).unwrap().distance_m;
+        let d1_rev = ai.iter().find(|r| r.direction < 0.0).unwrap().distance_m;
+        assert!(d1_fwd > d0_fwd);
+        assert!(d1_rev < d0_rev);
     }
 }

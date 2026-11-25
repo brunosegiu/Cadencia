@@ -2215,6 +2215,7 @@ impl LigneClaireRenderer {
             spline,
             player_dist_m,
             eff_player_lat_m,
+            1.0,
             player_wheel_rad,
             player_crank_rad,
             player_lean_rad,
@@ -2228,11 +2229,12 @@ impl LigneClaireRenderer {
             for (ai_idx, ai) in ai_riders.iter().enumerate() {
                 let s = spline.sample(ai.distance_m);
                 if s.pos.distance(cam_pos) < 180.0 {
-                    let base_id = 210 - (ai_idx as u32) * 5;
+                    let base_id = 210_u32.saturating_sub((ai_idx as u32) * 5).max(140);
                     build_rider_draw_parts(
                         spline,
                         ai.distance_m,
                         ai.lateral_m,
+                        ai.direction,
                         ai.wheel_angle_rad,
                         ai.crank_angle_rad,
                         ai.lean_angle_rad,

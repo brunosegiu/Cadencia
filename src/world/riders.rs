@@ -27,7 +27,15 @@ pub struct AiRider {
     pub profile: RiderProfile,
     pub distance_m: f32,
     pub lateral_m: f32,
+    pub base_lateral_m: f32,
     pub speed_mps: f32,
+    /// `+1.0` = riding in the same direction as the player (right side of road);
+    /// `-1.0` = riding in the opposite direction / oncoming (left side of road).
+    pub direction: f32,
+    /// `0` for solo cyclists; `1..=N` for members of a cohesive cycling group.
+    pub group_id: u32,
+    /// Longitudinal offset within a cycling group (`0.0` for solo riders or group leader).
+    pub group_offset_m: f32,
     pub crank_angle_rad: f32,
     pub wheel_angle_rad: f32,
     pub lean_angle_rad: f32,
@@ -74,15 +82,259 @@ pub fn default_player_profile() -> RiderProfile {
 }
 
 pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
-    let specs: &[(&str, f32, f32, f32, [f32; 4], [f32; 4], [f32; 4], [f32; 4], [u8; 3], [u8; 3], [u8; 3])] = &[
-        // Left-ahead AI rider (matches O. Hansen in Reference Images: dark teal patterned kit, dark helmet)
-        ("O. Hansen", 7.4, -1.55, 2.5, [0.10, 0.24, 0.22, 1.0], [0.24, 0.58, 0.48, 1.0], [0.18, 0.20, 0.23, 1.0], [0.26, 0.32, 0.38, 1.0], [218, 174, 146], [198, 118, 72], [58, 118, 108]),
-        // Right-ahead AI rider (matches H. Dupont in Reference Images: seafoam turquoise jersey, crisp white helmet)
-        ("H. Dupont", 5.6, 1.46, 2.5, [0.34, 0.68, 0.65, 1.0], [0.26, 0.54, 0.54, 1.0], [0.95, 0.95, 0.93, 1.0], [0.38, 0.56, 0.62, 1.0], [224, 178, 152], [110, 74, 56], [92, 164, 155]),
-        ("A. Lsmith", -16.0, -0.8, 2.5, [0.22, 0.28, 0.54, 1.0], [0.76, 0.24, 0.28, 1.0], [0.22, 0.24, 0.28, 1.0], [0.45, 0.35, 0.32, 1.0], [164, 122, 98], [48, 40, 38], [56, 72, 138]),
-        ("O. Hansen ", -20.0, 0.9, 2.5, [0.36, 0.52, 0.32, 1.0], [0.62, 0.72, 0.44, 1.0], [0.85, 0.83, 0.78, 1.0], [0.32, 0.40, 0.36, 1.0], [212, 168, 140], [148, 116, 84], [116, 134, 92]),
-        ("M. Dupont", -24.0, -1.1, 2.5, [0.34, 0.44, 0.62, 1.0], [0.54, 0.66, 0.80, 1.0], [0.26, 0.28, 0.32, 1.0], [0.28, 0.36, 0.48, 1.0], [222, 178, 154], [78, 54, 46], [88, 112, 158]),
-        ("L. Moreau", -32.0, 0.6, 2.4, [0.16, 0.46, 0.34, 1.0], [0.88, 0.72, 0.26, 1.0], [0.84, 0.84, 0.82, 1.0], [0.52, 0.36, 0.28, 1.0], [208, 160, 132], [58, 44, 40], [42, 118, 86]),
+    // Mix of solo cyclists and cohesive cycling groups (some riding the player's direction on the right side
+    // of the road, some riding the opposite direction on the left side of the road), spaced around the loop
+    // so the player meets ~2 solo cyclists or cycling groups per minute!
+    // Tuple: (name, dist_offset_m, base_lateral_m, w_per_kg, direction, group_id, group_offset_m,
+    //         jersey_primary, jersey_secondary, helmet_color, frame_color, skin, hair, shirt)
+    #[allow(clippy::type_complexity)]
+    let specs: &[(
+        &str,
+        f32,
+        f32,
+        f32,
+        f32,
+        u32,
+        f32,
+        [f32; 4],
+        [f32; 4],
+        [f32; 4],
+        [f32; 4],
+        [u8; 3],
+        [u8; 3],
+        [u8; 3],
+    )] = &[
+        // 1. Opening Solo Cyclist ahead in the right lane (same direction, +14m ahead)
+        (
+            "H. Dupont",
+            14.5,
+            1.42,
+            2.45,
+            1.0,
+            0,
+            0.0,
+            [0.34, 0.68, 0.65, 1.0],
+            [0.26, 0.54, 0.54, 1.0],
+            [0.95, 0.95, 0.93, 1.0],
+            [0.38, 0.56, 0.62, 1.0],
+            [224, 178, 152],
+            [110, 74, 56],
+            [92, 164, 155],
+        ),
+        // 2. Opening Oncoming Solo Cyclist in the left lane (opposite direction, +29m ahead riding toward player!)
+        (
+            "O. Hansen",
+            29.0,
+            -1.25,
+            2.65,
+            -1.0,
+            0,
+            0.0,
+            [0.10, 0.24, 0.22, 1.0],
+            [0.24, 0.58, 0.48, 1.0],
+            [0.18, 0.20, 0.23, 1.0],
+            [0.26, 0.32, 0.38, 1.0],
+            [218, 174, 146],
+            [198, 118, 72],
+            [58, 118, 108],
+        ),
+        // 3. Oncoming Cycling Group #1 (3-rider paceline/echelon in the left lane, ~360m ahead -> met after ~26s)
+        (
+            "A. Lsmith",
+            360.0,
+            -1.08,
+            2.70,
+            -1.0,
+            1,
+            0.0,
+            [0.22, 0.28, 0.54, 1.0],
+            [0.76, 0.24, 0.28, 1.0],
+            [0.22, 0.24, 0.28, 1.0],
+            [0.45, 0.35, 0.32, 1.0],
+            [164, 122, 98],
+            [48, 40, 38],
+            [56, 72, 138],
+        ),
+        (
+            "M.Silva",
+            362.5,
+            -1.72,
+            2.70,
+            -1.0,
+            1,
+            2.5,
+            [0.22, 0.28, 0.54, 1.0],
+            [0.86, 0.74, 0.24, 1.0],
+            [0.92, 0.90, 0.86, 1.0],
+            [0.32, 0.38, 0.46, 1.0],
+            [212, 168, 140],
+            [148, 116, 84],
+            [56, 72, 138],
+        ),
+        (
+            "C. Rossi",
+            365.0,
+            -1.22,
+            2.70,
+            -1.0,
+            1,
+            5.0,
+            [0.25, 0.32, 0.58, 1.0],
+            [0.76, 0.24, 0.28, 1.0],
+            [0.22, 0.24, 0.28, 1.0],
+            [0.40, 0.42, 0.45, 1.0],
+            [220, 174, 148],
+            [64, 48, 40],
+            [62, 80, 148],
+        ),
+        // 4. Same-Direction Solo Climber/Cruiser in the right lane (+75m ahead, slower 2.05 W/kg so player catches them in ~50s)
+        (
+            "M. Dupont",
+            75.0,
+            1.52,
+            2.05,
+            1.0,
+            0,
+            0.0,
+            [0.34, 0.44, 0.62, 1.0],
+            [0.54, 0.66, 0.80, 1.0],
+            [0.26, 0.28, 0.32, 1.0],
+            [0.28, 0.36, 0.48, 1.0],
+            [222, 178, 154],
+            [78, 54, 46],
+            [88, 112, 158],
+        ),
+        // 5. Oncoming Solo Sprinter in the left lane (~760m ahead -> met after ~55s)
+        (
+            "L. Moreau",
+            760.0,
+            -1.28,
+            2.85,
+            -1.0,
+            0,
+            0.0,
+            [0.16, 0.46, 0.34, 1.0],
+            [0.88, 0.72, 0.26, 1.0],
+            [0.84, 0.84, 0.82, 1.0],
+            [0.52, 0.36, 0.28, 1.0],
+            [208, 160, 132],
+            [58, 44, 40],
+            [42, 118, 86],
+        ),
+        // 6. Same-Direction Cycling Group #2 (3-rider group on the right side, +160m ahead at 2.15 W/kg)
+        (
+            "E. Vance",
+            160.0,
+            0.95,
+            2.15,
+            1.0,
+            2,
+            0.0,
+            [0.78, 0.32, 0.24, 1.0],
+            [0.94, 0.82, 0.32, 1.0],
+            [0.92, 0.92, 0.90, 1.0],
+            [0.30, 0.32, 0.35, 1.0],
+            [226, 180, 150],
+            [92, 64, 48],
+            [198, 82, 62],
+        ),
+        (
+            "K. Lind",
+            157.6,
+            1.58,
+            2.15,
+            1.0,
+            2,
+            -2.4,
+            [0.78, 0.32, 0.24, 1.0],
+            [0.94, 0.82, 0.32, 1.0],
+            [0.24, 0.26, 0.30, 1.0],
+            [0.36, 0.38, 0.42, 1.0],
+            [230, 188, 160],
+            [210, 168, 96],
+            [198, 82, 62],
+        ),
+        (
+            "P. Gomez",
+            155.2,
+            1.18,
+            2.15,
+            1.0,
+            2,
+            -4.8,
+            [0.78, 0.32, 0.24, 1.0],
+            [0.22, 0.26, 0.34, 1.0],
+            [0.92, 0.92, 0.90, 1.0],
+            [0.28, 0.30, 0.34, 1.0],
+            [196, 152, 122],
+            [44, 36, 32],
+            [198, 82, 62],
+        ),
+        // 7. Oncoming Cycling Group #3 (4-rider 2x2 peloton in the left lane, ~1180m ahead -> met after ~85s)
+        (
+            "R. Weber",
+            1180.0,
+            -1.05,
+            2.60,
+            -1.0,
+            3,
+            0.0,
+            [0.36, 0.52, 0.32, 1.0],
+            [0.62, 0.72, 0.44, 1.0],
+            [0.85, 0.83, 0.78, 1.0],
+            [0.32, 0.40, 0.36, 1.0],
+            [212, 168, 140],
+            [148, 116, 84],
+            [116, 134, 92],
+        ),
+        (
+            "T. Novak",
+            1180.4,
+            -1.72,
+            2.60,
+            -1.0,
+            3,
+            0.4,
+            [0.36, 0.52, 0.32, 1.0],
+            [0.62, 0.72, 0.44, 1.0],
+            [0.24, 0.28, 0.26, 1.0],
+            [0.34, 0.42, 0.38, 1.0],
+            [218, 174, 148],
+            [72, 56, 44],
+            [116, 134, 92],
+        ),
+        (
+            "D. Costa",
+            1183.0,
+            -1.10,
+            2.60,
+            -1.0,
+            3,
+            3.0,
+            [0.36, 0.52, 0.32, 1.0],
+            [0.88, 0.78, 0.32, 1.0],
+            [0.85, 0.83, 0.78, 1.0],
+            [0.30, 0.38, 0.34, 1.0],
+            [188, 144, 116],
+            [38, 32, 28],
+            [116, 134, 92],
+        ),
+        (
+            "J. Borel",
+            1183.4,
+            -1.76,
+            2.60,
+            -1.0,
+            3,
+            3.4,
+            [0.36, 0.52, 0.32, 1.0],
+            [0.62, 0.72, 0.44, 1.0],
+            [0.24, 0.28, 0.26, 1.0],
+            [0.32, 0.40, 0.36, 1.0],
+            [224, 180, 152],
+            [120, 86, 60],
+            [116, 134, 92],
+        ),
     ];
     specs
         .iter()
@@ -90,23 +342,27 @@ pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
         .map(|(i, s)| AiRider {
             profile: RiderProfile {
                 name: s.0,
-                level: 10 + (i as u32 % 7),
+                level: 10 + (i as u32 % 9),
                 w_per_kg: s.3,
-                jersey_primary: s.4,
-                jersey_secondary: s.5,
-                jersey_accent: s.5,
-                helmet_color: s.6,
-                helmet_accent: s.5,
-                frame_color: s.7,
+                jersey_primary: s.7,
+                jersey_secondary: s.8,
+                jersey_accent: s.8,
+                helmet_color: s.9,
+                helmet_accent: s.8,
+                frame_color: s.10,
                 has_backpack: false,
-                avatar_skin: s.8,
-                avatar_hair: s.9,
-                avatar_shirt: s.10,
+                avatar_skin: s.11,
+                avatar_hair: s.12,
+                avatar_shirt: s.13,
                 is_player: false,
             },
             distance_m: (start_dist_m + s.1).rem_euclid(route_len_m),
             lateral_m: s.2,
-            speed_mps: 24.5 / 3.6,
+            base_lateral_m: s.2,
+            speed_mps: (24.0 / 3.6) * (s.3 / 2.55),
+            direction: s.4,
+            group_id: s.5,
+            group_offset_m: s.6,
             crank_angle_rad: -1.1 + (i as f32) * 1.45,
             wheel_angle_rad: (i as f32) * 0.7,
             lean_angle_rad: 0.0,
@@ -114,21 +370,67 @@ pub fn spawn_ai_peloton(start_dist_m: f32, route_len_m: f32) -> Vec<AiRider> {
         .collect()
 }
 
-pub fn step_ai_peloton(dt: f32, spline: &RouteSpline, riders: &mut [AiRider]) {
+pub fn step_ai_peloton(
+    dt: f32,
+    spline: &RouteSpline,
+    player_dist_m: f32,
+    player_lat_m: f32,
+    riders: &mut [AiRider],
+) {
     let dt = dt.clamp(0.0, 0.1);
+    let total = spline.total_length_m;
+
+    // First compute leader distance & speed for each cycling group (group_id > 0) so groups stay tightly together
+    let mut group_leaders: [(f32, f32, bool); 8] = [(0.0, 0.0, false); 8];
+
     for (idx, r) in riders.iter_mut().enumerate() {
+        let dir = if r.direction >= 0.0 { 1.0_f32 } else { -1.0_f32 };
         let s = spline.sample(r.distance_m);
-        // Gentle realistic speed modulation based on grade & target W/kg
-        let grade_factor = (1.0 - s.grade_pct * 0.045).clamp(0.45, 1.55);
-        let target_v = (24.5 / 3.6) * (r.profile.w_per_kg / 2.55) * grade_factor;
+        // Signed grade along the rider's actual travel direction (uphill for oncoming riders is -s.grade_pct!)
+        let signed_grade = s.grade_pct * dir;
+        let grade_factor = (1.0 - signed_grade * 0.045).clamp(0.45, 1.55);
+        let target_v = (24.2 / 3.6) * (r.profile.w_per_kg / 2.55) * grade_factor;
         r.speed_mps += (target_v - r.speed_mps) * (dt * 1.8).min(1.0);
         let ds = r.speed_mps * dt;
-        r.distance_m = (r.distance_m + ds).rem_euclid(spline.total_length_m);
+
+        if r.group_id > 0 && (r.group_id as usize) < group_leaders.len() {
+            let gid = r.group_id as usize;
+            if !group_leaders[gid].2 {
+                r.distance_m = (r.distance_m + dir * ds).rem_euclid(total);
+                group_leaders[gid] = (r.distance_m, r.speed_mps, true);
+            } else {
+                // Group follower stays locked in formation relative to the group leader
+                let (lead_d, lead_v, _) = group_leaders[gid];
+                r.speed_mps = lead_v;
+                r.distance_m = (lead_d + r.group_offset_m).rem_euclid(total);
+            }
+        } else {
+            r.distance_m = (r.distance_m + dir * ds).rem_euclid(total);
+        }
+
+        // Smooth lateral passing avoidance when a same-direction rider passes near the player on the right side
+        let mut target_lat = r.base_lateral_m;
+        if dir > 0.0 {
+            let mut d_rel = (r.distance_m - player_dist_m).rem_euclid(total);
+            if d_rel > 0.5 * total {
+                d_rel -= total;
+            }
+            if d_rel.abs() < 7.5 && (r.base_lateral_m - player_lat_m).abs() < 0.55 {
+                // Shift slightly left (toward inner right lane, still > 0.35m on the right side) while overtaking/being overtaken
+                target_lat = (player_lat_m - 0.62).max(0.35);
+            }
+        }
+        r.lateral_m += (target_lat - r.lateral_m) * (dt * 3.5).min(1.0);
+
         r.wheel_angle_rad = (r.wheel_angle_rad + ds / 0.34).rem_euclid(std::f32::consts::TAU);
-        let cad_rpm = 82.0 + (idx as f32 * 3.0) - s.grade_pct * 1.2;
+        let cad_rpm = (82.0 + ((idx % 5) as f32 * 2.5) - signed_grade * 1.2).clamp(55.0, 112.0);
         r.crank_angle_rad =
             (r.crank_angle_rad + (cad_rpm / 60.0) * std::f32::consts::TAU * dt).rem_euclid(std::f32::consts::TAU);
-        let target_lean = (r.speed_mps * r.speed_mps * s.curvature / 9.81).atan().clamp(-0.30, 0.30) * 0.65;
+        let signed_curv = s.curvature * dir;
+        let target_lean = (r.speed_mps * r.speed_mps * signed_curv / 9.81)
+            .atan()
+            .clamp(-0.30, 0.30)
+            * 0.65;
         r.lean_angle_rad += (target_lean - r.lean_angle_rad) * (dt * 5.0).min(1.0);
     }
 }
@@ -141,6 +443,7 @@ pub fn build_rider_draw_parts(
     spline: &RouteSpline,
     distance_m: f32,
     lateral_m: f32,
+    direction: f32,
     wheel_angle_rad: f32,
     crank_angle_rad: f32,
     lean_angle_rad: f32,
@@ -158,8 +461,13 @@ pub fn build_rider_draw_parts(
     let x_right = s.up.cross(z_back).normalize_or_zero();
     let y_up = z_back.cross(x_right).normalize_or_zero();
 
+    let dir_yaw = if direction < 0.0 {
+        std::f32::consts::PI
+    } else {
+        0.0_f32
+    };
     let (yaw_rot, eff_lean_rad, eff_wheel_rad, eff_crank_rad) = match pose_mode {
-        RiderPoseMode::Pedaling => (0.0_f32, lean_angle_rad, wheel_angle_rad, crank_angle_rad),
+        RiderPoseMode::Pedaling => (dir_yaw, lean_angle_rad, wheel_angle_rad, crank_angle_rad),
         RiderPoseMode::MenuStopped => (
             // Rotate rider ~138 deg so front wheel points toward bottom-right and right drivetrain side faces the camera
             -2.40_f32,
