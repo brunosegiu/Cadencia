@@ -3,5 +3,5 @@
 *.tmp
 *.apk
 *.idsig
-screenshots/capture.png
+/screenshots/
 /dist

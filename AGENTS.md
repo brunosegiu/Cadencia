@@ -25,7 +25,7 @@ All AI coding agents and contributors must follow these rules whenever modifying
 4. **Mandatory 4-Step Verification Before Every Commit:**
    - **Step 1 — Unit Tests:** Run `cargo test --offline` (all physics, spline, octree frustum culling, TAA Halton jitter, and BLE FTMS/CPS/CSC/HRS packet parser tests must pass with zero warnings).
    - **Step 2 — WebAssembly Target Check:** Run `cargo check --offline --target wasm32-unknown-unknown --no-default-features` to ensure platform-agnostic WebGPU/WASM compatibility.
-   - **Step 3 — Visual Screenshot Verification:** Render and visually inspect screenshots via the built-in headless renderer (which warms up 8 frames for full 8-phase Halton TAA convergence):
+   - **Step 3 — Visual Screenshot Verification (Local Only — Never Commit):** Render and visually inspect screenshots locally via the built-in headless renderer (which warms up 8 frames for full 8-phase Halton TAA convergence):
      ```powershell
      cargo run --offline -- --screenshot screenshots/mountain.png --biome mountain --distance 250
      cargo run --offline -- --screenshot screenshots/coastal.png --biome coastal --distance 180
@@ -33,7 +33,10 @@ All AI coding agents and contributors must follow these rules whenever modifying
      cargo run --offline -- --screenshot screenshots/main_menu.png --screen main_menu --biome mountain
      cargo run --offline -- --screenshot screenshots/settings.png --screen settings --biome coastal
      ```
-   - **Step 4 — Clean Git Commit:** Commit changes cleanly to git once tests, WASM check, and screenshots are verified.
+   - **Step 4 — Clean Git Commit (NEVER Commit or Push Screenshots):** Commit code/asset changes cleanly to git once tests, WASM check, and screenshots are verified. **NEVER commit or push `screenshots/` or any generated verification `.png` files to Git/GitHub** (`screenshots/` is gitignored; never use `git add -f` on screenshots, as binary images cause merge conflicts).
+5. **NEVER Commit or Push Screenshots to Git/GitHub:**
+   - The `screenshots/` directory is strictly for local visual verification and is ignored by `.gitignore`.
+   - Never track, force-add, commit, or push screenshot `.png` files to GitHub, as binary screenshot diffs cause frequent merge conflicts.
 
 ---
 
