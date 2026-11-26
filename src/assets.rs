@@ -153,6 +153,8 @@ pub enum ModelId {
     BikeFrame,
     BikeWheel,
     BikeCrank,
+    BikeComputer,
+    BikeBottleCage,
     RiderTorso,
     RiderHeadHelmet,
     RiderBackpack,
@@ -228,7 +230,11 @@ pub struct MeshSection {
 pub struct LoadedModel {
     pub sections: Vec<MeshSection>,
     pub skeleton: Option<SkeletonInfo>,
+    /// Half-diagonal of the model-space AABB, measured from `bounds_center`.
     pub bounding_radius: f32,
+    /// Model-space AABB centre. Bounding spheres must be centred here, not at the model origin:
+    /// e.g. the bike frame's origin is at road level while its handlebars sit 0.93 m up.
+    pub bounds_center: Vec3,
 }
 
 pub struct AssetBank {
@@ -441,16 +447,17 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
             max_pt = max_pt.max(p);
         }
     }
-    let bounding_radius = if min_pt.x <= max_pt.x {
-        (0.5 * (max_pt - min_pt)).length().max(0.05)
+    let (bounding_radius, bounds_center) = if min_pt.x <= max_pt.x {
+        ((0.5 * (max_pt - min_pt)).length().max(0.05), 0.5 * (min_pt + max_pt))
     } else {
-        0.5
+        (0.5, Vec3::ZERO)
     };
 
     LoadedModel {
         sections,
         skeleton,
         bounding_radius,
+        bounds_center,
     }
 }
 
@@ -461,6 +468,8 @@ impl AssetBank {
             (ModelId::BikeFrame, include_bytes!("../assets/models/bike_frame.glb")),
             (ModelId::BikeWheel, include_bytes!("../assets/models/bike_wheel.glb")),
             (ModelId::BikeCrank, include_bytes!("../assets/models/bike_crank.glb")),
+            (ModelId::BikeComputer, include_bytes!("../assets/models/bike_computer.glb")), // Unbranded GPS head unit on an out-front stem mount
+            (ModelId::BikeBottleCage, include_bytes!("../assets/models/bike_bottle_cage.glb")), // Down-tube bottle (jersey-tinted) + cage, authored in bike space
             (ModelId::RiderTorso, include_bytes!("../assets/models/rider_torso.glb")), // Manifold seated cyclist: aligned neck, flat athletic back, balanced glutes, sculpted wrists & UV leg weights
             (ModelId::RiderHeadHelmet, include_bytes!("../assets/models/rider_head_helmet.glb")), // Sculpted chin & recessed skull-base neck socket
             (ModelId::RiderBackpack, include_bytes!("../assets/models/rider_backpack.glb")),

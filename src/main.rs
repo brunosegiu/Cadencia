@@ -75,6 +75,7 @@ fn main() {
                         "34_back" | "back34" => CameraMode::TurnaroundBack34,
                         "34_front" | "front34" => CameraMode::TurnaroundFront34,
                         "fp" | "first_person" => CameraMode::FirstPerson,
+                        "chest" | "pov" | "chest_pov" => CameraMode::ChestPov,
                         _ => CameraMode::Chase,
                     };
                     i += 2;

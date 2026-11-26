@@ -341,6 +341,7 @@ impl WindowGpuState {
 
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let mut pending_actions = None;
+        let head_unit_uv = self.renderer.head_unit_screen_uv;
         let mut full_output = self.egui_ctx.run_pass(raw_input, |ctx| {
             let ble_txt = self.sim.ble_status();
             let act = draw_ui(
@@ -358,6 +359,7 @@ impl WindowGpuState {
                 self.sim.use_simulator,
                 &ble_txt,
                 self.sim.camera_mode,
+                head_unit_uv,
             );
             pending_actions = Some(act);
         });
@@ -776,6 +778,7 @@ pub fn render_headless_screenshot_screen(
             )),
             ..Default::default()
         };
+        let head_unit_uv = renderer.head_unit_screen_uv;
         let mut full_out = egui_ctx.run_pass(raw_input, |ctx| {
             let ble_txt = sim.ble_status();
             let _ = draw_ui(
@@ -793,6 +796,7 @@ pub fn render_headless_screenshot_screen(
                 sim.use_simulator,
                 &ble_txt,
                 sim.camera_mode,
+                head_unit_uv,
             );
         });
         let paint_jobs = egui_ctx.tessellate(full_out.shapes, pixels_per_point);

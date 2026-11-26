@@ -245,6 +245,8 @@ fn camera_name_localized(cam: CameraMode, lang: Language) -> &'static str {
         (CameraMode::Side, Language::Spanish) => "Lateral",
         (CameraMode::FirstPerson, Language::English) => "First Person",
         (CameraMode::FirstPerson, Language::Spanish) => "Primera Persona",
+        (CameraMode::ChestPov, Language::English) => "Chest POV",
+        (CameraMode::ChestPov, Language::Spanish) => "POV Pecho",
         (CameraMode::TurnaroundBack, Language::English) => "Back",
         (CameraMode::TurnaroundBack, Language::Spanish) => "Trasera",
         (CameraMode::TurnaroundBack34, Language::English) => "3/4 Back",
@@ -441,9 +443,15 @@ pub fn draw_hud(
     using_sim: bool,
     ble_status: &str,
     camera_mode: CameraMode,
+    head_unit_uv: Option<[[f32; 2]; 4]>,
 ) -> HudActions {
     let mut actions = HudActions::default();
     let screen = ctx.input(|i| i.content_rect());
+    if camera_mode == CameraMode::ChestPov {
+        if let Some(uv) = head_unit_uv {
+            draw_head_unit_screen(ctx, screen, uv, telemetry, hud_state.language);
+        }
+    }
     let w = screen.width().max(640.0);
     let h = screen.height().max(480.0);
 
@@ -1116,6 +1124,7 @@ pub fn draw_hud(
                         CameraMode::Wide,
                         CameraMode::Side,
                         CameraMode::FirstPerson,
+                        CameraMode::ChestPov,
                     ] {
                         if ui
                             .selectable_label(camera_mode == cam, camera_name_localized(cam, lang))
@@ -2177,6 +2186,7 @@ pub fn draw_ui(
     using_sim: bool,
     ble_status: &str,
     camera_mode: CameraMode,
+    head_unit_uv: Option<[[f32; 2]; 4]>,
 ) -> HudActions {
     let lang = hud_state.language;
     match screen_mode {
@@ -2199,7 +2209,53 @@ pub fn draw_ui(
             using_sim,
             ble_status,
             camera_mode,
+            head_unit_uv,
         ),
+    }
+}
+
+/// Draws live power and heart rate onto the handlebar head unit's 3D display (Chest POV only).
+/// `uv` holds the display corners (TL, TR, BR, BL) in normalized screen space, projected by the renderer.
+fn draw_head_unit_screen(
+    ctx: &egui::Context,
+    screen: egui::Rect,
+    uv: [[f32; 2]; 4],
+    telemetry: &TelemetrySample,
+    lang: Language,
+) {
+    let pt = |c: [f32; 2]| Pos2::new(screen.min.x + c[0] * screen.width(), screen.min.y + c[1] * screen.height());
+    let [tl, tr, br, bl] = uv.map(pt);
+    let height = ((bl - tl).length() + (br - tr).length()) * 0.5;
+    if height < 6.0 {
+        return;
+    }
+    let lerp = |a: Pos2, b: Pos2, t: f32| a + (b - a) * t;
+    // Point inside the (perspective-skewed) display: u = left->right, v = top->bottom.
+    let at = |u: f32, v: f32| lerp(lerp(tl, tr, u), lerp(bl, br, u), v);
+
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("head_unit_screen")));
+    let ink = Color32::from_rgb(24, 26, 30);
+    painter.add(egui::Shape::convex_polygon(
+        vec![tl, tr, br, bl],
+        Color32::from_rgb(196, 204, 186),
+        Stroke::new(1.0, ink),
+    ));
+    painter.line_segment([at(0.06, 0.5), at(0.94, 0.5)], Stroke::new(1.0, ink));
+
+    let (pwr_lbl, hr_lbl) = match lang {
+        Language::English => ("POWER", "HEART"),
+        Language::Spanish => ("POTENCIA", "PULSO"),
+    };
+    let label_font = FontId::proportional((height * 0.085).max(5.0));
+    let value_font = FontId::proportional((height * 0.26).max(8.0));
+    let fields = [
+        (0.0, pwr_lbl, format!("{:.0}", telemetry.power_w.max(0.0)), "W"),
+        (0.5, hr_lbl, format!("{:.0}", telemetry.heart_rate_bpm.max(0.0)), "BPM"),
+    ];
+    for (v0, label, value, unit) in fields {
+        painter.text(at(0.08, v0 + 0.06), Align2::LEFT_TOP, label, label_font.clone(), ink);
+        painter.text(at(0.50, v0 + 0.30), Align2::CENTER_CENTER, value, value_font.clone(), ink);
+        painter.text(at(0.92, v0 + 0.44), Align2::RIGHT_BOTTOM, unit, label_font.clone(), ink);
     }
 }
 
