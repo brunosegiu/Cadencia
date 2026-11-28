@@ -2,10 +2,11 @@
 // Minimal register footprint: no procedural noise textures, no branches, unlit albedo output.
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
-@group(1) @binding(0) var<uniform> obj: ObjectUniforms;
+@group(1) @binding(0) var<storage, read> objects: array<ObjectData>;
 
 @vertex
 fn vs_gbuf_skinned(in: VertexInput) -> GBufferVertOut {
+    let obj = objects[in.object_idx];
     let wp = obj.model * vec4<f32>(in.pos, 1.0);
     let wn = normalize((obj.normal_mat * vec4<f32>(normalize(in.normal_mat.xyz), 0.0)).xyz);
     let vn = normalize((frame.view_mat * vec4<f32>(wn, 0.0)).xyz);

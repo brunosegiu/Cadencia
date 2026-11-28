@@ -19,13 +19,11 @@ struct FrameUniforms {
     cascade_splits: vec4<f32>,
 };
 
-struct ObjectUniforms {
+struct ObjectData {
     model: mat4x4<f32>,
     normal_mat: mat4x4<f32>,
     tint: vec4<f32>,
     obj_info: vec4<f32>, // x = object_id/255, y = outline_weight, z = crease_sens, w = use_vertex_meta
-    skin_pose_r: vec4<f32>,
-    skin_pose_l: vec4<f32>,
 };
 
 struct VertexInput {
@@ -33,6 +31,7 @@ struct VertexInput {
     @location(1) normal_mat: vec4<f32>, // Snorm8x4: xyz = normal, w = packed_mat / 127.0
     @location(2) uv: vec2<f32>,         // Float16x2
     @location(3) color: vec4<f32>,      // Unorm8x4
+    @location(4) object_idx: u32,       // VertexStepMode::Instance -> shared ObjectData[] index
 };
 
 struct GBufferVertOut {

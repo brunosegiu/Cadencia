@@ -224,6 +224,8 @@ pub struct MeshSection {
     pub indices: Vec<u32>,
     pub role: MaterialRole,
     pub base_color: [f32; 4],
+    pub bounds_center: Vec3,
+    pub bounds_half_extents: Vec3,
 }
 
 #[derive(Debug, Clone)]
@@ -428,12 +430,30 @@ fn load_glb(id: ModelId, bytes: &[u8]) -> LoadedModel {
                 }
             }
 
+            let mut sec_min = Vec3::splat(f32::MAX);
+            let mut sec_max = Vec3::splat(f32::MIN);
+            for v in &vertices {
+                let p = Vec3::from(v.pos);
+                sec_min = sec_min.min(p);
+                sec_max = sec_max.max(p);
+            }
+            let (bounds_center, bounds_half_extents) = if sec_min.x <= sec_max.x {
+                (
+                    0.5 * (sec_min + sec_max),
+                    (0.5 * (sec_max - sec_min)).max(Vec3::splat(0.01)),
+                )
+            } else {
+                (Vec3::ZERO, Vec3::splat(0.1))
+            };
+
             sections.push(MeshSection {
                 vertices,
                 skin_weights,
                 indices,
                 role,
                 base_color: color,
+                bounds_center,
+                bounds_half_extents,
             });
         }
     }

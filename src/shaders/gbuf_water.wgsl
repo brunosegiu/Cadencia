@@ -3,10 +3,11 @@
 // sun reflection shimmer and atmospheric fog are evaluated in the deferred lighting pass.
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
-@group(1) @binding(0) var<uniform> obj: ObjectUniforms;
+@group(1) @binding(0) var<storage, read> objects: array<ObjectData>;
 
 @vertex
 fn vs_gbuf_water(in: VertexInput) -> GBufferVertOut {
+    let obj = objects[in.object_idx];
     let wp = obj.model * vec4<f32>(in.pos, 1.0);
     let vn = normalize((frame.view_mat * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
     let vp = frame.view_mat * wp;

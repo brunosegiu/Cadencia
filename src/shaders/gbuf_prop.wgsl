@@ -2,10 +2,11 @@
 // Evaluates non-periodic vertex wind sway and outputs unlit prop albedo + packed per-vertex metadata.
 
 @group(0) @binding(0) var<uniform> frame: FrameUniforms;
-@group(1) @binding(0) var<uniform> obj: ObjectUniforms;
+@group(1) @binding(0) var<storage, read> objects: array<ObjectData>;
 
 @vertex
 fn vs_gbuf_prop(in: VertexInput) -> GBufferVertOut {
+    let obj = objects[in.object_idx];
     let use_vtx_meta = obj.obj_info.w > 0.5;
     var wp = obj.model * vec4<f32>(in.pos, 1.0);
     if (use_vtx_meta && (in.uv.x > 0.0001 || in.uv.y > 0.0001)) {

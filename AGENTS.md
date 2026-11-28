@@ -82,16 +82,17 @@ Every 3D mesh vertex is strictly **24 bytes** (`#[repr(C)]`):
   - **Tier 1:** Small shadow casters (`world_radius < 0.90 m`, rendered in CSM Cascade 0 only)
   - **Tier 2:** Medium shadow casters (`0.90 m <= world_radius < 2.50 m`, rendered in CSM Cascades 0 & 1)
   - **Tier 3:** Large shadow casters (`world_radius >= 2.50 m`, rendered in CSM Cascades 0, 1 & 2)
-- Each sector therefore emits at most **7 static `GpuDrawDesc` entries** (`road`, `terrain`, `wire`, `prop_tiers[0..4]`), uploaded once per world load and sorted by uniform slot (`uniform_idx`) so the entire static world requires at most **4 `set_bind_group` calls** in the G-Buffer pass and **1 `set_bind_group` call** per shadow cascade.
+- Each sector therefore emits at most **7 static `GpuDrawDesc` entries** (`road`, `terrain`, `wire`, `prop_tiers[0..4]`, plus global `water` in `BUCKET_WATER`), uploaded once per world load and sorted by `(material_bucket, sector_id, object_idx)` so all 3D geometry shares one read-only `ObjectData[]` storage buffer (`@group(1) @binding(0)`) indexed via per-instance `@location(4) object_idx` (`instance_id_vb`) with **zero per-object `set_bind_group` calls**.
 
-### 4.3 Two-Level Frustum Culling (CPU 3D Octree + GPU 6-Plane Indirect Compute)
+### 4.3 Two-Level Frustum Culling & Single-Call-Per-Material Multi-Draw Indirect
 1. **CPU Top-Down 3D Octree Frustum Culling (`WorldOctree::query_frustum`):**
    - Each frame, the CPU extracts 6 Gribb-Hartmann frustum planes (`Frustum::from_view_proj`) for the unjittered camera view-projection matrix and the 3 CSM orthographic light matrices.
-   - The CPU traverses `geo.octree.query_frustum` top-down, setting visible leaf sector bits in 128-bit bitmasks (`cam_sector_mask`, `shadow_sector_mask`, and per-cascade `csm_sector_masks`). Bit `127` is reserved for dynamic cyclists.
-2. **Multi-Dispatch GPU Per-Draw-Call 6-Plane Frustum & CSM Size Culling (`src/shaders/cull_indirect.wgsl`, Pass 0b):**
-   - Culling runs in **4 separate compute dispatches** using **4 separate indirect draw argument buffers** (`cam_indirect_buf` for the color G-Buffer view and `csm_indirect_bufs[0..3]` for each CSM shadow cascade) and dedicated `SinglePassCullUniforms` buffers:
-     - **Dispatch 0 (Color View):** Checks the sector bit in `cam_sector_mask`, tests the draw call's world bounding sphere (`pos_radius`) against the 6 camera frustum planes and `max_prop_draw_distance_m`, and writes `DrawIndexedIndirectCmd` into `cam_indirect_buf`.
-     - **Dispatches 1..=3 (CSM Cascades C0, C1, C2):** Each cascade dispatch checks its per-cascade `csm_sector_masks[ci]`, filters the draw call's caster radius (`caster_r`) against `[csm_min_caster_r[ci], csm_max_caster_r[ci]]`, tests the 6 orthographic cascade frustum planes, and writes `DrawIndexedIndirectCmd` into `csm_indirect_bufs[ci]`.
+   - The CPU traverses `geo.octree.query_frustum` top-down, setting visible leaf sector bits in 128-bit bitmasks (`cam_sector_mask` and per-cascade `csm_sector_masks`). Bit `127` is reserved for dynamic cyclists and global water.
+2. **Single-Dispatch GPU Culling & Stream Compaction (`src/shaders/cull_indirect.wgsl`, Pass 0b):**
+   - Culling runs in **1 single compute dispatch** using `MultiPassCullUniforms`, reading `draw_desc_buf` once per thread and atomically stream-compacting visible `DrawIndexedIndirectCmd` entries (with `first_instance = desc.object_idx`) into non-overlapping per-bucket slices of **one shared `indirect_draw_buf`** and **one 32-byte `draw_counts_buf`** (`array<atomic<u32>, 8>`):
+     - **Slots `0..5` (Color G-Buffer Material Buckets):** `0 = Road`, `1 = Terrain`, `2 = Prop` (wires + baked prop tiers), `3 = Skinned` (riders/bikes/animals), `4 = Water`. Drops camera G-Buffer draws whose unjittered projected screen-space AABB has `max(width_px, height_px) < 8.0` (`MIN_PROJECTED_BBOX_PX`).
+     - **Slots `5..8` (CSM Cascades C0, C1, C2):** Filters `cast_shadow`, `csm_sector_masks[ci]`, caster radius `[csm_min_caster_r[ci], csm_max_caster_r[ci]]`, and the 6 orthographic cascade frustum planes.
+   - Render passes issue at most **1 `multi_draw_indexed_indirect(_count)` call per CSM shadow cascade** (3 total) and **1 per non-empty G-Buffer material bucket** (up to 5 total), binding `objects_buf` and `instance_id_vb` once.
 
 ### 4.4 Pre-Render Compute Skinning (`src/shaders/skinning.wgsl`, Pass 0a)
 - **No inline skinning in vertex shaders.**
@@ -100,7 +101,7 @@ Every 3D mesh vertex is strictly **24 bytes** (`#[repr(C)]`):
 
 ### 4.5 Shared Shader Common Library (`src/shaders/common.wgsl`) & Domain-Permuted Unlit G-Buffer Pass (`Pass 4`)
 - **No monolithic G-Buffer uber-shader or material `if/else` chains.**
-- Shared structs (`FrameUniforms`, `ObjectUniforms`, `VertexInput`, `GBufferVertOut`, `GBufferOut`), octahedral normal encoding/decoding (`oct_encode`, `oct_decode`), procedural noise (`hash21`, `value_noise`), and non-periodic vegetation wind sway (`apply_vegetation_sway`) live in `src/shaders/common.wgsl` and are prepended at shader module creation time.
+- Shared structs (`FrameUniforms`, `ObjectData`, `VertexInput`, `GBufferVertOut`, `GBufferOut`), octahedral normal encoding/decoding (`oct_encode`, `oct_decode`), procedural noise (`hash21`, `value_noise`), and non-periodic vegetation wind sway (`apply_vegetation_sway`) live in `src/shaders/common.wgsl` and are prepended at shader module creation time.
 - **No lighting or shadow sampling in the G-Buffer pass.** Each material domain has its own dedicated G-Buffer shader and `wgpu::RenderPipeline` outputting only **unlit surface albedo + `outline_weight`** to `@location(0) albedo_tex` (`Rgba8Unorm`), **octahedral view normal + `crease_sensitivity` + `object_id / 255.0`** to `@location(1) normal_tex` (`Rgba8Unorm`), and hardware depth to `scene_depth_tex` (`Depth32Float`):
   - `src/shaders/gbuf_road.wgsl` (`gbuf_road_tarmac_pipeline` & `gbuf_road_gravel_pipeline`)
   - `src/shaders/gbuf_terrain.wgsl` (`gbuf_terrain_natural_pipeline` & `gbuf_terrain_coastal_pipeline`)

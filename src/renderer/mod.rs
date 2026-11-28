@@ -16,6 +16,35 @@ use crate::world::{BiomeId, RouteSpline};
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
 pub const CSM_ORTHO_RADII: [f32; NUM_SHADOW_CASCADES] = [12.0, 42.0, 128.0];
+pub const CSM_SPLIT_DEPTHS: [f32; NUM_SHADOW_CASCADES] = [18.0, 68.0, 215.0];
+pub const CSM_MIN_CASTER_R: [f32; NUM_SHADOW_CASCADES] = [0.0, 0.90, 2.50];
+pub const CSM_MAX_CASTER_R: [f32; NUM_SHADOW_CASCADES] = [28.0, 45.0, 90.0];
+
+pub const BUCKET_ROAD: usize = 0;
+pub const BUCKET_TERRAIN: usize = 1;
+pub const BUCKET_PROP: usize = 2;
+pub const BUCKET_SKINNED: usize = 3;
+pub const BUCKET_WATER: usize = 4;
+pub const NUM_MATERIAL_BUCKETS: usize = 5;
+pub const NUM_DRAW_COUNT_SLOTS: usize = NUM_MATERIAL_BUCKETS + NUM_SHADOW_CASCADES; // 5 G-Buffer buckets + 3 CSM cascades
+pub const MAX_SKINNED_VERTS: usize = 524288;
+pub const MAX_SKIN_JOBS: usize = 512;
+pub const MAX_SKIN_BONES: usize = 2048;
+pub const MAX_INDIRECT_COMMANDS: usize = 16384;
+pub const MAX_TOTAL_INDIRECT_SLOTS: usize = MAX_INDIRECT_COMMANDS * (1 + NUM_SHADOW_CASCADES);
+pub const MIN_PROJECTED_BBOX_PX: f32 = 8.0;
+
+pub fn preferred_device_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    let avail = adapter.features();
+    let mut req = wgpu::Features::empty();
+    if avail.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
+        req |= wgpu::Features::INDIRECT_FIRST_INSTANCE;
+    }
+    if avail.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT) {
+        req |= wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
+    }
+    req
+}
 
 /// Computes a texel-snapped orthographic light-space view-projection matrix for one CSM cascade,
 /// extending the depth range upstream/downstream by `1 / sin(elevation)` so tall buildings and
@@ -37,10 +66,6 @@ pub fn compute_csm_cascade_vp(center: Vec3, shadow_sun_dir: Vec3, r_ortho: f32) 
         Mat4::orthographic_rh(-r_ortho, r_ortho, -r_ortho, r_ortho, 1.5, z_back + z_front);
     light_proj * light_view
 }
-pub const MAX_SKINNED_VERTS: usize = 524288;
-pub const MAX_SKIN_JOBS: usize = 512;
-pub const MAX_SKIN_BONES: usize = 2048;
-pub const MAX_INDIRECT_COMMANDS: usize = 16384;
 
 #[derive(Debug, Clone, Copy)]
 pub struct GraphicsSettings {
@@ -161,13 +186,11 @@ pub struct TaaUniforms {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct ObjectUniforms {
+pub struct ObjectData {
     pub model: [[f32; 4]; 4],
     pub normal_mat: [[f32; 4]; 4],
     pub tint: [f32; 4],
     pub meta: [f32; 4],
-    pub skin_pose_r: [f32; 4],
-    pub skin_pose_l: [f32; 4],
 }
 
 #[repr(C)]
@@ -192,21 +215,38 @@ pub struct SkinJob {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct SinglePassCullUniforms {
-    pub frustum_planes: [[f32; 4]; 6],
-    pub filter_params: [f32; 4], // color pass: [cam.x, cam.y, cam.z, max_draw_dist]; shadow pass: [min_caster_r, max_caster_r, shadows_enabled, 0.0]
-    pub sector_mask: [u32; 4],
-    pub cmd_info: [u32; 4],      // [command_count, is_shadow_pass (0 = color view, 1 = CSM cascade), 0, 0]
+pub struct MultiPassCullUniforms {
+    pub cam_view_proj: [[f32; 4]; 4],
+    pub cam_planes: [[f32; 4]; 6],
+    pub csm_planes_0: [[f32; 4]; 6],
+    pub csm_planes_1: [[f32; 4]; 6],
+    pub csm_planes_2: [[f32; 4]; 6],
+    pub cam_pos_dist: [f32; 4],
+    pub screen_params: [f32; 4],
+    pub csm_min_r: [f32; 4],
+    pub csm_max_r: [f32; 4],
+    pub cam_sector_mask: [u32; 4],
+    pub csm_sector_mask_0: [u32; 4],
+    pub csm_sector_mask_1: [u32; 4],
+    pub csm_sector_mask_2: [u32; 4],
+    pub bucket_bases: [[u32; 4]; 2],
+    pub bucket_caps: [[u32; 4]; 2],
+    pub cmd_info: [u32; 4], // [cmd_count, compact_enabled (0/1), 0, 0]
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct GpuDrawDesc {
     pub pos_radius: [f32; 4],
+    pub aabb_half: [f32; 4],
     pub index_count: u32,
     pub first_index: u32,
     pub base_vertex: i32,
-    pub flags: u32, // bits 0..4: sector_id (0..15 or 31 for riders), bit 8: cast_shadow, bit 9: is_sector_surface
+    pub object_idx: u32,
+    pub flags: u32,           // bits 0..6: sector_id (0..126 or 127), bit 8: cast_shadow, bit 9: is_sector_surface, bits 16..31: rep_caster_cm
+    pub material_bucket: u32, // 0=Road, 1=Terrain, 2=Prop, 3=Skinned, 4=Water
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 #[repr(C)]
@@ -219,6 +259,74 @@ pub struct DrawIndexedIndirectCmd {
     pub first_instance: u32,
 }
 
+const _: () = assert!(std::mem::size_of::<ObjectData>() == 160);
+const _: () = assert!(std::mem::size_of::<GpuDrawDesc>() == 64);
+const _: () = assert!(std::mem::size_of::<DrawIndexedIndirectCmd>() == 20);
+const _: () = assert!(std::mem::size_of::<MultiPassCullUniforms>() == 656);
+const _: () = assert!(std::mem::size_of::<MultiPassCullUniforms>() % 16 == 0);
+
+pub fn transform_aabb(m: Mat4, local_center: Vec3, local_half: Vec3) -> (Vec3, Vec3) {
+    let world_center = m.transform_point3(local_center);
+    let rx = m.x_axis.truncate().abs();
+    let ry = m.y_axis.truncate().abs();
+    let rz = m.z_axis.truncate().abs();
+    let world_half = rx * local_half.x + ry * local_half.y + rz * local_half.z;
+    (world_center, world_half.max(Vec3::splat(0.01)))
+}
+
+pub fn projected_aabb_max_extent_px(
+    view_proj: Mat4,
+    center: Vec3,
+    half: Vec3,
+    screen_w: f32,
+    screen_h: f32,
+) -> f32 {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for i in 0..8 {
+        let sx = if (i & 1) != 0 { 1.0 } else { -1.0 };
+        let sy = if (i & 2) != 0 { 1.0 } else { -1.0 };
+        let sz = if (i & 4) != 0 { 1.0 } else { -1.0 };
+        let corner = center + Vec3::new(sx * half.x, sy * half.y, sz * half.z);
+        let clip = view_proj * corner.extend(1.0);
+        if clip.w <= 0.001 {
+            return f32::INFINITY;
+        }
+        let ndc_x = clip.x / clip.w;
+        let ndc_y = clip.y / clip.w;
+        min_x = min_x.min(ndc_x);
+        min_y = min_y.min(ndc_y);
+        max_x = max_x.max(ndc_x);
+        max_y = max_y.max(ndc_y);
+    }
+    let ext_w = (max_x - min_x) * 0.5 * screen_w;
+    let ext_h = (max_y - min_y) * 0.5 * screen_h;
+    ext_w.max(ext_h)
+}
+
+pub fn compute_indirect_layout(
+    cam_bucket_caps: [u32; NUM_MATERIAL_BUCKETS],
+    csm_caps: [u32; NUM_SHADOW_CASCADES],
+) -> ([u32; NUM_DRAW_COUNT_SLOTS], [u32; NUM_DRAW_COUNT_SLOTS], u32) {
+    let mut bases = [0u32; NUM_DRAW_COUNT_SLOTS];
+    let mut caps = [0u32; NUM_DRAW_COUNT_SLOTS];
+    let mut cursor = 0u32;
+    for i in 0..NUM_MATERIAL_BUCKETS {
+        bases[i] = cursor;
+        caps[i] = cam_bucket_caps[i];
+        cursor = cursor.saturating_add(cam_bucket_caps[i]);
+    }
+    for ci in 0..NUM_SHADOW_CASCADES {
+        let idx = NUM_MATERIAL_BUCKETS + ci;
+        bases[idx] = cursor;
+        caps[idx] = csm_caps[ci];
+        cursor = cursor.saturating_add(csm_caps[ci]);
+    }
+    (bases, caps, cursor)
+}
+
 #[derive(Clone, Copy)]
 struct GpuMeshSection {
     base_vertex: i32,
@@ -229,18 +337,16 @@ struct GpuMeshSection {
     role: MaterialRole,
     #[allow(dead_code)]
     base_color: [f32; 4],
+    bounds_center: Vec3,
+    bounds_half_extents: Vec3,
 }
 
 struct GpuModel {
     sections: Vec<GpuMeshSection>,
     bounding_radius: f32,
-    bounds_center: Vec3,
 }
 
 struct GpuWorldOffsets {
-    water_base_vertex: i32,
-    water_first_index: u32,
-    water_index_count: u32,
     skinned_base_vertex: u32,
 }
 
@@ -259,22 +365,6 @@ struct GBufferTargets {
     taa_history_views: [wgpu::TextureView; 2],
     post_bind_group: wgpu::BindGroup,
     taa_bind_groups: [wgpu::BindGroup; 2],
-}
-
-#[derive(Clone, Copy)]
-struct EnqueuedCommandRef {
-    cmd_slot: usize,
-    offset_bytes: u32,
-    shadow_candidate: bool,
-}
-
-#[derive(Clone, Copy)]
-struct StaticSectorCmd {
-    sector_id: usize,
-    cmd_slot: usize,
-    uniform_idx: usize, // 0 = road, 1 = terrain, 2 = wire, 3 = baked_prop_tier
-    shadow_candidate: bool,
-    caster_tier: u8,    // 0 = none, 1 = C0 only, 2 = C0..C1, 3 = C0..C2
 }
 
 /// Chest POV eye position relative to the rider's road contact point (metres, rider basis).
@@ -299,15 +389,19 @@ fn project_head_unit_screen(model: Mat4, view_proj: Mat4) -> Option<[[f32; 2]; 4
 
 pub struct LigneClaireRenderer {
     pub output_format: wgpu::TextureFormat,
+    supports_mdi_count: bool,
+    supports_indirect_first_instance: bool,
     models: HashMap<ModelId, GpuModel>,
     static_model_verts: Vec<SceneVertex>,
     static_model_indices: Vec<u32>,
     static_draw_descs: Vec<GpuDrawDesc>,
-    static_sector_cmds: Vec<StaticSectorCmd>,
+    static_bucket_counts: [u32; NUM_MATERIAL_BUCKETS],
+    static_shadow_counts: [u32; NUM_SHADOW_CASCADES],
     static_descs_dirty: bool,
     world_octree: WorldOctree,
 
     mega_vb: wgpu::Buffer,
+    instance_id_vb: wgpu::Buffer,
     mega_ib: wgpu::Buffer,
     world_offsets: GpuWorldOffsets,
 
@@ -322,25 +416,20 @@ pub struct LigneClaireRenderer {
     skin_bg: wgpu::BindGroup,
     skin_pipeline: wgpu::ComputePipeline,
 
-    // Sector Queue & Multi-Dispatch GPU Indirect Command Generation resources
-    // (1 dispatch + indirect draw arg buffer for Color View, 1 dispatch + indirect draw arg buffer per CSM Cascade)
-    cam_cull_uniform_buf: wgpu::Buffer,
-    csm_cull_uniform_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
+    // Single-Dispatch GPU Culling & Stream-Compacted Shared Indirect Draw Buffer resources
+    cull_uniform_buf: wgpu::Buffer,
     draw_desc_buf: wgpu::Buffer,
-    cam_indirect_buf: wgpu::Buffer,
-    csm_indirect_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
+    indirect_draw_buf: wgpu::Buffer,
+    draw_counts_buf: wgpu::Buffer,
     cull_bgl: wgpu::BindGroupLayout,
-    cam_cull_bg: wgpu::BindGroup,
-    csm_cull_bgs: [wgpu::Buffer; 0], // placeholder alignment
-    csm_cull_bind_groups: [wgpu::BindGroup; NUM_SHADOW_CASCADES],
+    cull_bg: wgpu::BindGroup,
     cull_pipeline: wgpu::ComputePipeline,
 
     frame_buf: wgpu::Buffer,
     shadow_frame_bufs: [wgpu::Buffer; NUM_SHADOW_CASCADES],
-    obj_align: usize,
     obj_buf: wgpu::Buffer,
     obj_capacity: usize,
-    obj_staging: Vec<u8>,
+    objects_staging: Vec<ObjectData>,
 
     shadow_tex: wgpu::Texture,
     shadow_array_view: wgpu::TextureView,
@@ -394,6 +483,12 @@ impl LigneClaireRenderer {
         height: u32,
         assets: &AssetBank,
     ) -> Self {
+        let features = device.features();
+        let supports_indirect_first_instance =
+            features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+        let supports_mdi_count = supports_indirect_first_instance
+            && features.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+
         let width = width.max(1);
         let height = height.max(1);
 
@@ -430,6 +525,8 @@ impl LigneClaireRenderer {
                     skin_src_offset,
                     role: sec.role,
                     base_color: sec.base_color,
+                    bounds_center: sec.bounds_center,
+                    bounds_half_extents: sec.bounds_half_extents,
                 });
             }
             models.insert(
@@ -437,7 +534,6 @@ impl LigneClaireRenderer {
                 GpuModel {
                     sections: gpu_secs,
                     bounding_radius: model.bounding_radius,
-                    bounds_center: model.bounds_center,
                 },
             );
         }
@@ -477,9 +573,6 @@ impl LigneClaireRenderer {
         });
 
         let world_offsets = GpuWorldOffsets {
-            water_base_vertex: 0,
-            water_first_index: 0,
-            water_index_count: 0,
             skinned_base_vertex: initial_skinned_base,
         };
 
@@ -599,25 +692,17 @@ impl LigneClaireRenderer {
             cache: None,
         });
 
-        // Sector Queue & Multi-Dispatch GPU Indirect Command Generation compute pipeline
-        // Separate uniform buffers and separate indirect draw argument buffers for Color View and each CSM Cascade
-        let single_cull_u_size = std::mem::size_of::<SinglePassCullUniforms>() as u64;
-        let single_indirect_buf_size =
-            (std::mem::size_of::<DrawIndexedIndirectCmd>() * MAX_INDIRECT_COMMANDS) as u64;
+        // Single-Dispatch GPU Culling & Stream-Compacted Shared Indirect Draw Buffer pipeline
+        let multi_cull_u_size = std::mem::size_of::<MultiPassCullUniforms>() as u64;
+        let shared_indirect_buf_size =
+            (std::mem::size_of::<DrawIndexedIndirectCmd>() * MAX_TOTAL_INDIRECT_SLOTS) as u64;
+        let draw_counts_buf_size = (std::mem::size_of::<u32>() * NUM_DRAW_COUNT_SLOTS) as u64;
 
-        let cam_cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cam_cull_uniform_buf"),
-            size: single_cull_u_size,
+        let cull_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("multi_cull_uniform_buf"),
+            size: multi_cull_u_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let csm_cull_uniform_bufs = std::array::from_fn(|ci| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("csm_cull_uniform_buf_c{ci}")),
-                size: single_cull_u_size,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
         });
         let draw_desc_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("draw_desc_buf"),
@@ -625,23 +710,21 @@ impl LigneClaireRenderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let cam_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cam_indirect_draw_buf"),
-            size: single_indirect_buf_size,
+        let indirect_draw_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared_indirect_draw_buf"),
+            size: shared_indirect_buf_size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let csm_indirect_bufs = std::array::from_fn(|ci| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(&format!("csm_indirect_draw_buf_c{ci}")),
-                size: single_indirect_buf_size,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
+        let draw_counts_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared_draw_counts_buf"),
+            size: draw_counts_buf_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         let cull_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cull_bgl"),
@@ -652,7 +735,7 @@ impl LigneClaireRenderer {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(single_cull_u_size),
+                        min_binding_size: NonZeroU64::new(multi_cull_u_size),
                     },
                     count: None,
                 },
@@ -680,35 +763,39 @@ impl LigneClaireRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(draw_counts_buf_size),
+                    },
+                    count: None,
+                },
             ],
         });
-        let make_cull_bg = |label: &str, u_buf: &wgpu::Buffer, ind_buf: &wgpu::Buffer| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &cull_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: u_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: draw_desc_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: ind_buf.as_entire_binding(),
-                    },
-                ],
-            })
-        };
-        let cam_cull_bg = make_cull_bg("cam_cull_bg", &cam_cull_uniform_buf, &cam_indirect_buf);
-        let csm_cull_bind_groups = std::array::from_fn(|ci| {
-            make_cull_bg(
-                &format!("csm_cull_bg_c{ci}"),
-                &csm_cull_uniform_bufs[ci],
-                &csm_indirect_bufs[ci],
-            )
+        let cull_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cull_bg"),
+            layout: &cull_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cull_uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: draw_desc_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: indirect_draw_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: draw_counts_buf.as_entire_binding(),
+                },
+            ],
         });
         let cull_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cull_indirect_shader"),
@@ -743,14 +830,14 @@ impl LigneClaireRenderer {
             })
         });
 
-        let obj_align = device.limits().min_uniform_buffer_offset_alignment.max(256) as usize;
         let obj_capacity = MAX_INDIRECT_COMMANDS;
         let obj_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("object_uniforms"),
-            size: (obj_align * obj_capacity) as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("objects_storage_buf"),
+            size: (std::mem::size_of::<ObjectData>() * obj_capacity) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let instance_id_vb = Self::make_instance_id_vb(device, obj_capacity);
 
         let shadow_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shadow_csm_array"),
@@ -967,14 +1054,14 @@ impl LigneClaireRenderer {
         });
 
         let obj_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("obj_bgl"),
+            label: Some("objects_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: NonZeroU64::new(std::mem::size_of::<ObjectUniforms>() as u64),
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: NonZeroU64::new(std::mem::size_of::<ObjectData>() as u64),
                 },
                 count: None,
             }],
@@ -1051,7 +1138,7 @@ impl LigneClaireRenderer {
                 module: &shadow_mod,
                 entry_point: Some("vs_shadow"),
                 compilation_options: Default::default(),
-                buffers: &[Some(SceneVertex::desc())],
+                buffers: &[Some(SceneVertex::desc()), Some(Self::instance_id_vb_desc())],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1130,7 +1217,7 @@ impl LigneClaireRenderer {
                         module,
                         entry_point: Some(vs_entry),
                         compilation_options: Default::default(),
-                        buffers: &[Some(SceneVertex::desc())],
+                        buffers: &[Some(SceneVertex::desc()), Some(Self::instance_id_vb_desc())],
                     },
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1294,17 +1381,21 @@ impl LigneClaireRenderer {
 
         Self {
             output_format,
+            supports_mdi_count,
+            supports_indirect_first_instance,
             models,
             static_model_verts,
             static_model_indices,
             static_draw_descs: Vec::new(),
-            static_sector_cmds: Vec::new(),
+            static_bucket_counts: [0; NUM_MATERIAL_BUCKETS],
+            static_shadow_counts: [0; NUM_SHADOW_CASCADES],
             static_descs_dirty: true,
             world_octree: WorldOctree {
                 nodes: Vec::new(),
                 root: 0,
             },
             mega_vb,
+            instance_id_vb,
             mega_ib,
             world_offsets,
             skin_src_vb,
@@ -1316,22 +1407,18 @@ impl LigneClaireRenderer {
             skin_bgl,
             skin_bg,
             skin_pipeline,
-            cam_cull_uniform_buf,
-            csm_cull_uniform_bufs,
+            cull_uniform_buf,
             draw_desc_buf,
-            cam_indirect_buf,
-            csm_indirect_bufs,
+            indirect_draw_buf,
+            draw_counts_buf,
             cull_bgl,
-            cam_cull_bg,
-            csm_cull_bgs: [],
-            csm_cull_bind_groups,
+            cull_bg,
             cull_pipeline,
             frame_buf,
             shadow_frame_bufs,
-            obj_align,
             obj_buf,
             obj_capacity,
-            obj_staging: vec![0u8; obj_align * obj_capacity],
+            objects_staging: vec![ObjectData::zeroed(); obj_capacity],
             shadow_tex,
             shadow_array_view,
             shadow_cascade_views,
@@ -1415,17 +1502,61 @@ impl LigneClaireRenderer {
 
     fn make_obj_bg(device: &wgpu::Device, bgl: &wgpu::BindGroupLayout, buf: &wgpu::Buffer) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("obj_bg"),
+            label: Some("objects_bg"),
             layout: bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
-                    offset: 0,
-                    size: NonZeroU64::new(std::mem::size_of::<ObjectUniforms>() as u64),
-                }),
+                resource: buf.as_entire_binding(),
             }],
         })
+    }
+
+    fn make_instance_id_vb(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
+        let ids: Vec<u32> = (0..cap as u32).collect();
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("instance_id_vb"),
+            contents: bytemuck::cast_slice(&ids),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+
+    fn instance_id_vb_desc() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: &[wgpu::VertexAttribute] = &[wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 4,
+            format: wgpu::VertexFormat::Uint32,
+        }];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<u32>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: ATTRS,
+        }
+    }
+
+    fn submit_indirect_bucket<'a>(
+        &'a self,
+        rpass: &mut wgpu::RenderPass<'a>,
+        base_slot: u32,
+        max_count: u32,
+        count_index: u32,
+    ) {
+        if max_count == 0 {
+            return;
+        }
+        let indirect_cmd_size = std::mem::size_of::<DrawIndexedIndirectCmd>() as u64;
+        let offset = (base_slot as u64) * indirect_cmd_size;
+        if self.supports_mdi_count {
+            let count_offset = (count_index as u64) * std::mem::size_of::<u32>() as u64;
+            rpass.multi_draw_indexed_indirect_count(
+                &self.indirect_draw_buf,
+                offset,
+                &self.draw_counts_buf,
+                count_offset,
+                max_count,
+            );
+        } else {
+            rpass.multi_draw_indexed_indirect(&self.indirect_draw_buf, offset, max_count);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1629,62 +1760,53 @@ impl LigneClaireRenderer {
         all_indices.extend_from_slice(&geo.water_indices);
 
         // Pre-bake static sector draw descriptors and per-sector CSM-size-tiered prop meshes
-        let mut static_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(geo.sectors.len() * 7);
-        let mut static_sector_cmds: Vec<StaticSectorCmd> = Vec::with_capacity(geo.sectors.len() * 7);
+        let mut static_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(geo.sectors.len() * 7 + 1);
         let mut exact_sector_bounds: Vec<(Vec3, Vec3)> =
             geo.sectors.iter().map(|s| (s.aabb_min, s.aabb_max)).collect();
 
         for (sid, sec) in geo.sectors.iter().enumerate() {
             let sec_flag = (sid as u32) | 512u32; // bit 9 = is_sector_surface
+            let sec_half = ((sec.aabb_max - sec.aabb_min) * 0.5).max(Vec3::splat(0.1));
             if sec.road_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = static_draw_descs.len();
                 static_draw_descs.push(GpuDrawDesc {
                     pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    aabb_half: [sec_half.x, sec_half.y, sec_half.z, 0.0],
                     index_count: sec.road_index_count,
                     first_index: road_first_index + sec.road_index_offset,
                     base_vertex: road_base_vertex,
+                    object_idx: 0,
                     flags: sec_flag,
-                });
-                static_sector_cmds.push(StaticSectorCmd {
-                    sector_id: sid,
-                    cmd_slot: slot,
-                    uniform_idx: 0,
-                    shadow_candidate: false,
-                    caster_tier: 0,
+                    material_bucket: BUCKET_ROAD as u32,
+                    _pad0: 0,
+                    _pad1: 0,
                 });
             }
             if sec.terrain_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = static_draw_descs.len();
                 static_draw_descs.push(GpuDrawDesc {
                     pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    aabb_half: [sec_half.x, sec_half.y, sec_half.z, 0.0],
                     index_count: sec.terrain_index_count,
                     first_index: terrain_first_index + sec.terrain_index_offset,
                     base_vertex: terrain_base_vertex,
+                    object_idx: 1,
                     flags: sec_flag,
-                });
-                static_sector_cmds.push(StaticSectorCmd {
-                    sector_id: sid,
-                    cmd_slot: slot,
-                    uniform_idx: 1,
-                    shadow_candidate: false,
-                    caster_tier: 0,
+                    material_bucket: BUCKET_TERRAIN as u32,
+                    _pad0: 0,
+                    _pad1: 0,
                 });
             }
             if sec.wire_index_count > 0 && static_draw_descs.len() < MAX_INDIRECT_COMMANDS {
-                let slot = static_draw_descs.len();
                 static_draw_descs.push(GpuDrawDesc {
                     pos_radius: [sec.center.x, sec.center.y, sec.center.z, sec.bounding_radius],
+                    aabb_half: [sec_half.x, sec_half.y, sec_half.z, 0.0],
                     index_count: sec.wire_index_count,
                     first_index: wire_first_index + sec.wire_index_offset,
                     base_vertex: wire_base_vertex,
+                    object_idx: 2,
                     flags: sec_flag,
-                });
-                static_sector_cmds.push(StaticSectorCmd {
-                    sector_id: sid,
-                    cmd_slot: slot,
-                    uniform_idx: 2,
-                    shadow_candidate: false,
-                    caster_tier: 0,
+                    material_bucket: BUCKET_PROP as u32,
+                    _pad0: 0,
+                    _pad1: 0,
                 });
             }
 
@@ -1865,41 +1987,89 @@ impl LigneClaireRenderer {
                     all_indices.extend_from_slice(&tier_indices[tier_idx]);
 
                     let t_center = (tier_min[tier_idx] + tier_max[tier_idx]) * 0.5;
+                    let t_half =
+                        ((tier_max[tier_idx] - tier_min[tier_idx]) * 0.5).max(Vec3::splat(0.1))
+                            + Vec3::splat(0.25);
                     let t_radius = (tier_max[tier_idx] - t_center).length().max(0.5) + 1.0;
                     exact_sector_bounds[sid].0 =
                         exact_sector_bounds[sid].0.min(tier_min[tier_idx] - Vec3::splat(1.0));
                     exact_sector_bounds[sid].1 =
                         exact_sector_bounds[sid].1.max(tier_max[tier_idx] + Vec3::splat(1.0));
-                    let (cast_shadow, rep_caster_cm, caster_tier): (bool, u32, u8) = match tier_idx {
-                        0 => (false, 0, 0),
-                        1 => (true, 50, 1),  // 0.50 m -> Cascade 0 only
-                        2 => (true, 160, 2), // 1.60 m -> Cascades 0 & 1
-                        _ => (true, 600, 3), // 6.00 m -> Cascades 0, 1 & 2
+                    let (cast_shadow, rep_caster_cm): (bool, u32) = match tier_idx {
+                        0 => (false, 0),
+                        1 => (true, 50),  // 0.50 m -> Cascade 0 only
+                        2 => (true, 160), // 1.60 m -> Cascades 0 & 1
+                        _ => (true, 600), // 6.00 m -> Cascades 0, 1 & 2
                     };
                     let flags = (sid as u32)
                         | if cast_shadow { 256u32 } else { 0u32 }
                         | (rep_caster_cm << 16);
-                    let slot = static_draw_descs.len();
                     static_draw_descs.push(GpuDrawDesc {
                         pos_radius: [t_center.x, t_center.y, t_center.z, t_radius],
+                        aabb_half: [t_half.x, t_half.y, t_half.z, 0.0],
                         index_count: tier_index_count,
                         first_index: tier_first_index,
                         base_vertex: tier_base_vertex,
+                        object_idx: 3,
                         flags,
-                    });
-                    static_sector_cmds.push(StaticSectorCmd {
-                        sector_id: sid,
-                        cmd_slot: slot,
-                        uniform_idx: 3,
-                        shadow_candidate: cast_shadow,
-                        caster_tier,
+                        material_bucket: BUCKET_PROP as u32,
+                        _pad0: 0,
+                        _pad1: 0,
                     });
                 }
             }
         }
 
-        // Group static sector commands by uniform_idx so each render pass binds at most 4 static uniform offsets
-        static_sector_cmds.sort_by_key(|c| (c.uniform_idx, c.sector_id, c.cmd_slot));
+        if water_index_count > 0
+            && !geo.water_vertices.is_empty()
+            && static_draw_descs.len() < MAX_INDIRECT_COMMANDS
+        {
+            let mut w_min = Vec3::splat(f32::INFINITY);
+            let mut w_max = Vec3::splat(f32::NEG_INFINITY);
+            for v in &geo.water_vertices {
+                let p = Vec3::from_array(v.pos);
+                w_min = w_min.min(p);
+                w_max = w_max.max(p);
+            }
+            let w_center = (w_min + w_max) * 0.5;
+            let w_half = ((w_max - w_min) * 0.5).max(Vec3::splat(0.1));
+            let w_radius = (w_max - w_center).length().max(1.0);
+            static_draw_descs.push(GpuDrawDesc {
+                pos_radius: [w_center.x, w_center.y, w_center.z, w_radius],
+                aabb_half: [w_half.x, w_half.y, w_half.z, 0.0],
+                index_count: water_index_count,
+                first_index: water_first_index,
+                base_vertex: water_base_vertex,
+                object_idx: 4,
+                flags: 127u32 | 512u32, // always-visible sector 127 + is_sector_surface, cast_shadow = false
+                material_bucket: BUCKET_WATER as u32,
+                _pad0: 0,
+                _pad1: 0,
+            });
+        }
+
+        // Group static draw descriptors by (material_bucket, sector_id, object_idx)
+        static_draw_descs.sort_by_key(|d| (d.material_bucket, d.flags & 127, d.object_idx));
+
+        let mut static_bucket_counts = [0u32; NUM_MATERIAL_BUCKETS];
+        let mut static_shadow_counts = [0u32; NUM_SHADOW_CASCADES];
+        for d in &static_draw_descs {
+            let b = (d.material_bucket as usize).min(NUM_MATERIAL_BUCKETS - 1);
+            static_bucket_counts[b] += 1;
+            if (d.flags & 256) != 0 {
+                let raw_caster_cm = d.flags >> 16;
+                let caster_r = if raw_caster_cm > 0 {
+                    (raw_caster_cm as f32) * 0.01
+                } else {
+                    d.pos_radius[3]
+                };
+                for ci in 0..NUM_SHADOW_CASCADES {
+                    if caster_r >= CSM_MIN_CASTER_R[ci] && caster_r <= CSM_MAX_CASTER_R[ci] {
+                        static_shadow_counts[ci] += 1;
+                    }
+                }
+            }
+        }
 
         let skinned_base_vertex = all_verts.len() as u32;
         all_verts.resize(all_verts.len() + MAX_SKINNED_VERTS, SceneVertex::zeroed());
@@ -1917,13 +2087,11 @@ impl LigneClaireRenderer {
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         });
         self.world_offsets = GpuWorldOffsets {
-            water_base_vertex,
-            water_first_index,
-            water_index_count,
             skinned_base_vertex,
         };
         self.static_draw_descs = static_draw_descs;
-        self.static_sector_cmds = static_sector_cmds;
+        self.static_bucket_counts = static_bucket_counts;
+        self.static_shadow_counts = static_shadow_counts;
         self.static_descs_dirty = true;
         self.world_octree = geo.octree.clone();
         crate::world::terrain::update_octree_bounds_from_sector_aabbs(
@@ -1944,7 +2112,7 @@ impl LigneClaireRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn push_obj_uniform(
+    fn push_object_data(
         &mut self,
         device: &wgpu::Device,
         idx: usize,
@@ -1954,17 +2122,18 @@ impl LigneClaireRenderer {
         outline_weight: f32,
         crease_sensitivity: f32,
         use_vertex_meta: bool,
-    ) -> u32 {
+    ) {
         if idx >= self.obj_capacity {
             let new_cap = (idx + 512).next_power_of_two();
             self.obj_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("object_uniforms"),
-                size: (self.obj_align * new_cap) as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                label: Some("objects_storage_buf"),
+                size: (std::mem::size_of::<ObjectData>() * new_cap) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
             self.obj_bg = Self::make_obj_bg(device, &self.obj_bgl, &self.obj_buf);
-            self.obj_staging.resize(self.obj_align * new_cap, 0);
+            self.instance_id_vb = Self::make_instance_id_vb(device, new_cap);
+            self.objects_staging.resize(new_cap, ObjectData::zeroed());
             self.obj_capacity = new_cap;
         }
         let normal_mat = if model == Mat4::IDENTITY {
@@ -1972,7 +2141,7 @@ impl LigneClaireRenderer {
         } else {
             model.inverse().transpose()
         };
-        let u = ObjectUniforms {
+        self.objects_staging[idx] = ObjectData {
             model: model.to_cols_array_2d(),
             normal_mat: normal_mat.to_cols_array_2d(),
             tint,
@@ -1982,13 +2151,7 @@ impl LigneClaireRenderer {
                 crease_sensitivity,
                 if use_vertex_meta { 1.0 } else { 0.0 },
             ],
-            skin_pose_r: [0.0; 4],
-            skin_pose_l: [0.0; 4],
         };
-        let off = idx * self.obj_align;
-        let bytes = bytemuck::bytes_of(&u);
-        self.obj_staging[off..off + bytes.len()].copy_from_slice(bytes);
-        off as u32
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2174,9 +2337,9 @@ impl LigneClaireRenderer {
             ]
         };
         let csm_ortho_radii = CSM_ORTHO_RADII;
-        let csm_split_depths: [f32; NUM_SHADOW_CASCADES] = [18.0, 68.0, 215.0];
-        let csm_min_caster_r: [f32; NUM_SHADOW_CASCADES] = [0.0, 0.90, 2.50];
-        let csm_max_caster_r: [f32; NUM_SHADOW_CASCADES] = [28.0, 45.0, 90.0];
+        let csm_split_depths = CSM_SPLIT_DEPTHS;
+        let csm_min_caster_r = CSM_MIN_CASTER_R;
+        let csm_max_caster_r = CSM_MAX_CASTER_R;
 
         let cascade_vp: [Mat4; NUM_SHADOW_CASCADES] = std::array::from_fn(|ci| {
             compute_csm_cascade_vp(csm_centers[ci], shadow_sun_dir, csm_ortho_radii[ci])
@@ -2313,51 +2476,19 @@ impl LigneClaireRenderer {
         }
 
         let static_cmd_base = self.static_draw_descs.len();
-        let mut draw_count = 0usize;
         let mut rider_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(96);
-        let mut rider_cmds: Vec<EnqueuedCommandRef> = Vec::with_capacity(96);
         let mut skin_jobs: Vec<SkinJob> = Vec::with_capacity(64);
         let mut skin_bones: Vec<[[f32; 4]; 4]> = Vec::with_capacity(256);
         let mut max_skin_verts_in_job = 0u32;
         let mut skinned_vert_cursor = self.world_offsets.skinned_base_vertex;
 
-        let transform_max_scale = |m: &Mat4| -> f32 {
-            let sx = m.x_axis.truncate().length();
-            let sy = m.y_axis.truncate().length();
-            let sz = m.z_axis.truncate().length();
-            sx.max(sy).max(sz).max(0.01)
-        };
-
-        // 1. Static world ObjectUniform slots (4 shared slots for the entire static world)
-        let road_off =
-            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0, false);
-        draw_count += 1;
-        let terrain_off =
-            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0, false);
-        draw_count += 1;
-        let wire_off =
-            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0, false);
-        draw_count += 1;
-        let prop_tier_off =
-            self.push_obj_uniform(device, draw_count, Mat4::IDENTITY, [1.0; 4], 0, 0.0, 0.0, true);
-        draw_count += 1;
-        let static_uniform_offsets = [road_off, terrain_off, wire_off, prop_tier_off];
-        let water_off = if self.world_offsets.water_index_count > 0 {
-            let off = self.push_obj_uniform(
-                device,
-                draw_count,
-                Mat4::IDENTITY,
-                [1.0; 4],
-                4,
-                0.0,
-                0.0,
-                false,
-            );
-            draw_count += 1;
-            Some(off)
-        } else {
-            None
-        };
+        // 1. Fixed static world ObjectData slots (0..5 shared across the entire static world)
+        self.push_object_data(device, 0, Mat4::IDENTITY, [1.0; 4], 1, 0.35, 0.0, false); // Road
+        self.push_object_data(device, 1, Mat4::IDENTITY, [1.0; 4], 2, 0.68, 0.0, false); // Terrain
+        self.push_object_data(device, 2, Mat4::IDENTITY, [1.0; 4], 3, 0.55, 0.0, false); // Wire
+        self.push_object_data(device, 3, Mat4::IDENTITY, [1.0; 4], 0, 0.0, 0.0, true);   // Baked prop tiers
+        self.push_object_data(device, 4, Mat4::IDENTITY, [1.0; 4], 4, 0.0, 0.0, false);  // Water
+        let mut obj_count = 5usize;
 
         // 2. Enqueue dynamic Riders & Compute-Skinned Quadruped Animals (pre-skinned via Compute Shader before rendering!)
         let mut rider_parts: Vec<RiderPartDraw> = Vec::with_capacity(192);
@@ -2415,14 +2546,10 @@ impl LigneClaireRenderer {
         build_animal_draw_parts(biome, spline, animals, cam_pos, &mut rider_parts);
 
         for rp in &rider_parts {
-            let (sec_count, base_bound_r, bounds_center) = match self.models.get(&rp.model) {
-                Some(m) => (m.sections.len(), m.bounding_radius, m.bounds_center),
+            let sec_count = match self.models.get(&rp.model) {
+                Some(m) => m.sections.len(),
                 None => continue,
             };
-            // Cull sphere centred on the model's AABB centre (not its origin), so tall parts such as
-            // the handlebars stay inside the sphere when the camera looks steeply down (Chest POV).
-            let pos = rp.transform.transform_point3(bounds_center);
-            let world_radius = base_bound_r.max(0.25) * transform_max_scale(&rp.transform);
             let (outline_w, crease_s) = match rp.model {
                 ModelId::BikeWheel => (0.72, 0.0),
                 ModelId::BikeFrame | ModelId::BikeCrank | ModelId::BikeComputer | ModelId::BikeBottleCage => (0.86, 0.0),
@@ -2457,9 +2584,10 @@ impl LigneClaireRenderer {
                     MaterialRole::HelmetAccent => rp.helmet_accent,
                     _ => [1.0, 1.0, 1.0, 1.0],
                 };
-                let off = self.push_obj_uniform(
+                let obj_idx = obj_count as u32;
+                self.push_object_data(
                     device,
-                    draw_count,
+                    obj_count,
                     rp.transform,
                     tint,
                     rp.object_id,
@@ -2467,7 +2595,7 @@ impl LigneClaireRenderer {
                     crease_s,
                     false,
                 );
-                draw_count += 1;
+                obj_count += 1;
 
                 let eff_base_vertex = if is_skinned
                     && skin_jobs.len() < MAX_SKIN_JOBS
@@ -2490,26 +2618,35 @@ impl LigneClaireRenderer {
                     ms.base_vertex
                 };
 
-                let slot = static_cmd_base + rider_draw_descs.len();
+                let (sec_pos, mut sec_half) =
+                    transform_aabb(rp.transform, ms.bounds_center, ms.bounds_half_extents);
+                if is_skinned {
+                    sec_half += Vec3::splat(0.20);
+                }
+                let sec_radius = sec_half.length().max(0.05);
+
                 rider_draw_descs.push(GpuDrawDesc {
-                    pos_radius: [pos.x, pos.y, pos.z, world_radius],
+                    pos_radius: [sec_pos.x, sec_pos.y, sec_pos.z, sec_radius],
+                    aabb_half: [sec_half.x, sec_half.y, sec_half.z, 0.0],
                     index_count: ms.index_count,
                     first_index: ms.first_index,
                     base_vertex: eff_base_vertex,
+                    object_idx: obj_idx,
                     flags: 127u32 | 256u32, // sector 127 (dynamic rider), cast_shadow = true
-                });
-                rider_cmds.push(EnqueuedCommandRef {
-                    cmd_slot: slot,
-                    offset_bytes: off,
-                    shadow_candidate: true,
+                    material_bucket: BUCKET_SKINNED as u32,
+                    _pad0: 0,
+                    _pad1: 0,
                 });
             }
         }
 
-        // Upload object uniforms, skinning jobs, bone matrices, and dynamic rider draw descriptors to GPU
-        let write_bytes = draw_count * self.obj_align;
-        if write_bytes > 0 {
-            queue.write_buffer(&self.obj_buf, 0, &self.obj_staging[..write_bytes]);
+        // Upload shared ObjectData[], skinning jobs, bone matrices, and dynamic rider draw descriptors to GPU
+        if obj_count > 0 {
+            queue.write_buffer(
+                &self.obj_buf,
+                0,
+                bytemuck::cast_slice(&self.objects_staging[..obj_count]),
+            );
         }
 
         let skin_params = SkinDispatchParams {
@@ -2537,34 +2674,63 @@ impl LigneClaireRenderer {
             );
         }
 
-        // Upload per-pass culling uniforms: 1 for Color View + 1 for each CSM Shadow Cascade
-        let cam_cull_u = SinglePassCullUniforms {
-            frustum_planes: cam_frustum.planes,
-            filter_params: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
-            sector_mask: cam_sector_mask,
-            cmd_info: [cmd_count, 0, 0, 0],
+        // Compute non-overlapping contiguous slices in shared indirect_draw_buf
+        let rider_count = rider_draw_descs.len() as u32;
+        let mut cam_bucket_caps = self.static_bucket_counts;
+        cam_bucket_caps[BUCKET_SKINNED] = cam_bucket_caps[BUCKET_SKINNED].saturating_add(rider_count);
+        let csm_caps: [u32; NUM_SHADOW_CASCADES] = if graphics.shadows_enabled {
+            std::array::from_fn(|ci| self.static_shadow_counts[ci].saturating_add(rider_count))
+        } else {
+            [0; NUM_SHADOW_CASCADES]
         };
-        queue.write_buffer(&self.cam_cull_uniform_buf, 0, bytemuck::bytes_of(&cam_cull_u));
+        let (bases, caps, total_slots) = compute_indirect_layout(cam_bucket_caps, csm_caps);
 
         let shadows_flag = if graphics.shadows_enabled { 1.0_f32 } else { 0.0_f32 };
-        for ci in 0..NUM_SHADOW_CASCADES {
-            let csm_cull_u = SinglePassCullUniforms {
-                frustum_planes: csm_frustums[ci].planes,
-                filter_params: [
-                    csm_min_caster_r[ci],
-                    csm_max_caster_r[ci],
-                    shadows_flag,
-                    0.0,
-                ],
-                sector_mask: csm_sector_masks[ci],
-                cmd_info: [cmd_count, 1, 0, 0],
-            };
-            queue.write_buffer(
-                &self.csm_cull_uniform_bufs[ci],
+        let cull_u = MultiPassCullUniforms {
+            cam_view_proj: unjittered_view_proj.to_cols_array_2d(),
+            cam_planes: cam_frustum.planes,
+            csm_planes_0: csm_frustums[0].planes,
+            csm_planes_1: csm_frustums[1].planes,
+            csm_planes_2: csm_frustums[2].planes,
+            cam_pos_dist: [cam_pos.x, cam_pos.y, cam_pos.z, max_prop_dist],
+            screen_params: [
+                target_width.max(1) as f32,
+                target_height.max(1) as f32,
+                MIN_PROJECTED_BBOX_PX,
+                0.0,
+            ],
+            csm_min_r: [
+                csm_min_caster_r[0],
+                csm_min_caster_r[1],
+                csm_min_caster_r[2],
+                shadows_flag,
+            ],
+            csm_max_r: [
+                csm_max_caster_r[0],
+                csm_max_caster_r[1],
+                csm_max_caster_r[2],
+                0.0,
+            ],
+            cam_sector_mask,
+            csm_sector_mask_0: csm_sector_masks[0],
+            csm_sector_mask_1: csm_sector_masks[1],
+            csm_sector_mask_2: csm_sector_masks[2],
+            bucket_bases: [
+                [bases[0], bases[1], bases[2], bases[3]],
+                [bases[4], bases[5], bases[6], bases[7]],
+            ],
+            bucket_caps: [
+                [caps[0], caps[1], caps[2], caps[3]],
+                [caps[4], caps[5], caps[6], caps[7]],
+            ],
+            cmd_info: [
+                cmd_count,
+                if self.supports_indirect_first_instance { 1 } else { 0 },
                 0,
-                bytemuck::bytes_of(&csm_cull_u),
-            );
-        }
+                0,
+            ],
+        };
+        queue.write_buffer(&self.cull_uniform_buf, 0, bytemuck::bytes_of(&cull_u));
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cadencia_encoder"),
@@ -2587,32 +2753,34 @@ impl LigneClaireRenderer {
             );
         }
 
-        // -----------------------------------------------------------------
-        // Pass 0b: Multi-Dispatch GPU Culling & Indirect Command Generation (cull_indirect.wgsl)
-        //          - Dispatch 0: Color G-Buffer View -> cam_indirect_buf
-        //          - Dispatches 1..=3: CSM Cascades C0, C1, C2 -> csm_indirect_bufs[0..3]
-        // -----------------------------------------------------------------
-        if cmd_count > 0 {
-            let workgroups = cmd_count.div_ceil(64);
-            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("cull_indirect_multi_dispatch_pass"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.cull_pipeline);
-            // Color G-Buffer View Culling Dispatch
-            cpass.set_bind_group(0, &self.cam_cull_bg, &[]);
-            cpass.dispatch_workgroups(workgroups, 1, 1);
-            // Separate Culling Dispatch per CSM Cascade
-            for ci in 0..NUM_SHADOW_CASCADES {
-                cpass.set_bind_group(0, &self.csm_cull_bind_groups[ci], &[]);
-                cpass.dispatch_workgroups(workgroups, 1, 1);
-            }
-        }
-
         let indirect_cmd_size = std::mem::size_of::<DrawIndexedIndirectCmd>() as u64;
 
         // -----------------------------------------------------------------
-        // Passes 1..3: 3-Cascade Directional Shadow Maps via Dedicated Per-Cascade Indirect Buffers
+        // Pass 0b: Single-Dispatch GPU Culling & Stream Compaction (cull_indirect.wgsl)
+        // -----------------------------------------------------------------
+        if self.supports_indirect_first_instance {
+            encoder.clear_buffer(&self.draw_counts_buf, 0, None);
+            if !self.supports_mdi_count && total_slots > 0 {
+                encoder.clear_buffer(
+                    &self.indirect_draw_buf,
+                    0,
+                    Some((total_slots as u64) * indirect_cmd_size),
+                );
+            }
+        }
+        if cmd_count > 0 {
+            let workgroups = cmd_count.div_ceil(64);
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("cull_indirect_single_dispatch_pass"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.cull_pipeline);
+            cpass.set_bind_group(0, &self.cull_bg, &[]);
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // -----------------------------------------------------------------
+        // Passes 1..3: 3-Cascade Directional Shadow Maps (1 MDI call per cascade)
         // -----------------------------------------------------------------
         for ci in 0..NUM_SHADOW_CASCADES {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2630,44 +2798,52 @@ impl LigneClaireRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            rpass.set_pipeline(&self.shadow_pipeline);
-            rpass.set_bind_group(0, &self.shadow_frame_bgs[ci], &[]);
-            rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
-            rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
-            let csm_ind_buf = &self.csm_indirect_bufs[ci];
-            if graphics.shadows_enabled {
-                let mut last_off: Option<u32> = None;
-                let csm_mask = &csm_sector_masks[ci];
-                let min_tier = (ci as u8) + 1;
-                for cmd in &self.static_sector_cmds {
-                    if cmd.shadow_candidate
-                        && cmd.caster_tier >= min_tier
-                        && is_sector_bit(csm_mask, cmd.sector_id)
+            let csm_cap = caps[NUM_MATERIAL_BUCKETS + ci];
+            if graphics.shadows_enabled && csm_cap > 0 {
+                rpass.set_pipeline(&self.shadow_pipeline);
+                rpass.set_bind_group(0, &self.shadow_frame_bgs[ci], &[]);
+                rpass.set_bind_group(1, &self.obj_bg, &[]);
+                rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
+                rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
+                if self.supports_indirect_first_instance {
+                    rpass.set_vertex_buffer(1, self.instance_id_vb.slice(..));
+                    self.submit_indirect_bucket(
+                        &mut rpass,
+                        bases[NUM_MATERIAL_BUCKETS + ci],
+                        csm_cap,
+                        (NUM_MATERIAL_BUCKETS + ci) as u32,
+                    );
+                } else {
+                    let mut last_obj_idx: Option<u32> = None;
+                    let csm_mask = &csm_sector_masks[ci];
+                    let cmd_count_usize = cmd_count as usize;
+                    for (cmd_id, desc) in self
+                        .static_draw_descs
+                        .iter()
+                        .chain(rider_draw_descs.iter())
+                        .enumerate()
                     {
-                        let off = static_uniform_offsets[cmd.uniform_idx];
-                        if last_off != Some(off) {
-                            rpass.set_bind_group(1, &self.obj_bg, &[off]);
-                            last_off = Some(off);
+                        if (desc.flags & 256) != 0
+                            && is_sector_bit(csm_mask, (desc.flags & 127) as usize)
+                        {
+                            if last_obj_idx != Some(desc.object_idx) {
+                                rpass.set_vertex_buffer(
+                                    1,
+                                    self.instance_id_vb.slice((desc.object_idx as u64 * 4)..),
+                                );
+                                last_obj_idx = Some(desc.object_idx);
+                            }
+                            let indirect_offset = (((1 + ci) * cmd_count_usize + cmd_id) as u64)
+                                * indirect_cmd_size;
+                            rpass.draw_indexed_indirect(&self.indirect_draw_buf, indirect_offset);
                         }
-                        let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                        rpass.draw_indexed_indirect(csm_ind_buf, indirect_offset);
-                    }
-                }
-                for cmd in &rider_cmds {
-                    if cmd.shadow_candidate {
-                        if last_off != Some(cmd.offset_bytes) {
-                            rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
-                            last_off = Some(cmd.offset_bytes);
-                        }
-                        let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                        rpass.draw_indexed_indirect(csm_ind_buf, indirect_offset);
                     }
                 }
             }
         }
 
         // -----------------------------------------------------------------
-        // Pass 4: Pure Unlit G-Buffer Pass (Domain-Permuted Shaders + Opaque Water)
+        // Pass 4: Pure Unlit G-Buffer Pass (1 Indirect Call Per Material Type)
         // -----------------------------------------------------------------
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2710,7 +2886,7 @@ impl LigneClaireRenderer {
             rpass.set_bind_group(0, &self.frame_bg, &[]);
             rpass.draw(0..3, 0..1);
 
-            // 4b. Static sector geometry via Domain-Specific G-Buffer Pipelines & cam_indirect_buf
+            // 4b. Bind shared frame, objects storage buffer, vertex/index buffers ONCE
             let road_pipe = if biome == BiomeId::RollingRuralGravel {
                 &self.gbuf_road_gravel_pipeline
             } else {
@@ -2723,60 +2899,64 @@ impl LigneClaireRenderer {
             };
 
             rpass.set_bind_group(0, &self.frame_bg, &[]);
+            rpass.set_bind_group(1, &self.obj_bg, &[]);
             rpass.set_vertex_buffer(0, self.mega_vb.slice(..));
             rpass.set_index_buffer(self.mega_ib.slice(..), wgpu::IndexFormat::Uint32);
-            let mut last_off: Option<u32> = None;
-            let mut last_domain: Option<usize> = None;
-            for cmd in &self.static_sector_cmds {
-                if is_sector_bit(&cam_sector_mask, cmd.sector_id) {
-                    let domain = match cmd.uniform_idx {
-                        0 => 0, // Road domain
-                        1 => 1, // Terrain domain
-                        _ => 2, // Prop/Wire/Foliage domain
-                    };
-                    if last_domain != Some(domain) {
-                        match domain {
-                            0 => rpass.set_pipeline(road_pipe),
-                            1 => rpass.set_pipeline(terrain_pipe),
-                            _ => rpass.set_pipeline(&self.gbuf_prop_pipeline),
-                        }
-                        last_domain = Some(domain);
-                    }
-                    let off = static_uniform_offsets[cmd.uniform_idx];
-                    if last_off != Some(off) {
-                        rpass.set_bind_group(1, &self.obj_bg, &[off]);
-                        last_off = Some(off);
-                    }
-                    let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                    rpass.draw_indexed_indirect(&self.cam_indirect_buf, indirect_offset);
-                }
-            }
 
-            // 4c. Dynamic Riders & Compute-Skinned Quadruped Animals via Dedicated Skinned G-Buffer Pipeline
-            if !rider_cmds.is_empty() {
-                rpass.set_pipeline(&self.gbuf_skinned_pipeline);
-                for cmd in &rider_cmds {
-                    if last_off != Some(cmd.offset_bytes) {
-                        rpass.set_bind_group(1, &self.obj_bg, &[cmd.offset_bytes]);
-                        last_off = Some(cmd.offset_bytes);
+            if self.supports_indirect_first_instance {
+                rpass.set_vertex_buffer(1, self.instance_id_vb.slice(..));
+                let bucket_pipelines: [(usize, &wgpu::RenderPipeline); NUM_MATERIAL_BUCKETS] = [
+                    (BUCKET_ROAD, road_pipe),
+                    (BUCKET_TERRAIN, terrain_pipe),
+                    (BUCKET_PROP, &self.gbuf_prop_pipeline),
+                    (BUCKET_SKINNED, &self.gbuf_skinned_pipeline),
+                    (BUCKET_WATER, &self.gbuf_water_pipeline),
+                ];
+                for (bucket_idx, pipeline) in bucket_pipelines {
+                    let cap = caps[bucket_idx];
+                    if cap > 0 {
+                        rpass.set_pipeline(pipeline);
+                        self.submit_indirect_bucket(
+                            &mut rpass,
+                            bases[bucket_idx],
+                            cap,
+                            bucket_idx as u32,
+                        );
                     }
-                    let indirect_offset = (cmd.cmd_slot as u64) * indirect_cmd_size;
-                    rpass.draw_indexed_indirect(&self.cam_indirect_buf, indirect_offset);
                 }
-            }
-
-            // 4d. Opaque Water rendered directly into the G-Buffer (lit in the deferred lighting pass)
-            if let Some(w_off) = water_off {
-                rpass.set_pipeline(&self.gbuf_water_pipeline);
-                rpass.set_bind_group(0, &self.frame_bg, &[]);
-                rpass.set_bind_group(1, &self.obj_bg, &[w_off]);
-                rpass.draw_indexed(
-                    self.world_offsets.water_first_index
-                        ..(self.world_offsets.water_first_index
-                            + self.world_offsets.water_index_count),
-                    self.world_offsets.water_base_vertex,
-                    0..1,
-                );
+            } else {
+                let mut last_bucket: Option<u32> = None;
+                let mut last_obj_idx: Option<u32> = None;
+                for (cmd_id, desc) in self
+                    .static_draw_descs
+                    .iter()
+                    .chain(rider_draw_descs.iter())
+                    .enumerate()
+                {
+                    if !is_sector_bit(&cam_sector_mask, (desc.flags & 127) as usize) {
+                        continue;
+                    }
+                    if last_bucket != Some(desc.material_bucket) {
+                        let pipeline = match desc.material_bucket as usize {
+                            BUCKET_ROAD => road_pipe,
+                            BUCKET_TERRAIN => terrain_pipe,
+                            BUCKET_PROP => &self.gbuf_prop_pipeline,
+                            BUCKET_SKINNED => &self.gbuf_skinned_pipeline,
+                            _ => &self.gbuf_water_pipeline,
+                        };
+                        rpass.set_pipeline(pipeline);
+                        last_bucket = Some(desc.material_bucket);
+                    }
+                    if last_obj_idx != Some(desc.object_idx) {
+                        rpass.set_vertex_buffer(
+                            1,
+                            self.instance_id_vb.slice((desc.object_idx as u64 * 4)..),
+                        );
+                        last_obj_idx = Some(desc.object_idx);
+                    }
+                    let indirect_offset = (cmd_id as u64) * indirect_cmd_size;
+                    rpass.draw_indexed_indirect(&self.indirect_draw_buf, indirect_offset);
+                }
             }
         }
 
@@ -2896,8 +3076,96 @@ impl LigneClaireRenderer {
             &self.gbuf.taa_history_tex,
             &self.frame_bgl,
             &self.cull_bgl,
-            &self.csm_cull_bgs,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_struct_sizes_match_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<ObjectData>(), 160);
+        assert_eq!(std::mem::size_of::<GpuDrawDesc>(), 64);
+        assert_eq!(std::mem::size_of::<DrawIndexedIndirectCmd>(), 20);
+        assert_eq!(std::mem::size_of::<MultiPassCullUniforms>(), 656);
+        assert_eq!(std::mem::size_of::<MultiPassCullUniforms>() % 16, 0);
+    }
+
+    #[test]
+    fn projected_aabb_culling_drops_tiny_meshes_and_keeps_visible_ones() {
+        let view = Mat4::look_at_rh(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let proj = Mat4::perspective_rh(50.0_f32.to_radians(), 1280.0 / 960.0, 0.25, 1900.0);
+        let vp = proj * view;
+
+        // Distant 0.2m cube at 200m: < 8 px -> dropped
+        let tiny_px = projected_aabb_max_extent_px(
+            vp,
+            Vec3::new(0.0, 0.0, -200.0),
+            Vec3::splat(0.1),
+            1280.0,
+            960.0,
+        );
+        assert!(tiny_px < MIN_PROJECTED_BBOX_PX, "expected < 8 px, got {tiny_px}");
+
+        // Midground 1.0m box at 40m: >> 8 px -> kept
+        let mid_px = projected_aabb_max_extent_px(
+            vp,
+            Vec3::new(0.0, 0.0, -40.0),
+            Vec3::splat(0.5),
+            1280.0,
+            960.0,
+        );
+        assert!(mid_px >= MIN_PROJECTED_BBOX_PX, "expected >= 8 px, got {mid_px}");
+
+        // Thin tall post at 60m (0.04m wide, 2.0m tall): max(w, h) >= 8 px -> kept
+        let pole_px = projected_aabb_max_extent_px(
+            vp,
+            Vec3::new(0.0, 0.0, -60.0),
+            Vec3::new(0.02, 1.0, 0.02),
+            1280.0,
+            960.0,
+        );
+        assert!(pole_px >= MIN_PROJECTED_BBOX_PX, "expected >= 8 px, got {pole_px}");
+
+        // Box straddling near plane (z = 0): returns INFINITY -> kept
+        let near_px = projected_aabb_max_extent_px(
+            vp,
+            Vec3::new(0.0, 0.0, -0.2),
+            Vec3::splat(0.5),
+            1280.0,
+            960.0,
+        );
+        assert!(near_px.is_infinite());
+
+        // transform_aabb with 90-degree Y rotation swaps X/Z half-extents cleanly
+        let rot_y = Mat4::from_translation(Vec3::new(10.0, 2.0, -5.0))
+            * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let (wc, wh) = transform_aabb(rot_y, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.5, 1.0, 2.0));
+        assert!((wc - Vec3::new(10.0, 2.0, -6.0)).length() < 1e-4);
+        assert!((wh - Vec3::new(2.0, 1.0, 0.5)).length() < 1e-4);
+    }
+
+    #[test]
+    fn indirect_layout_partitions_without_overlap() {
+        // Campo case: water bucket has 0 capacity, shadows enabled
+        let cam_caps = [20, 20, 45, 30, 0];
+        let csm_caps = [40, 35, 32];
+        let (bases, caps, total) = compute_indirect_layout(cam_caps, csm_caps);
+        assert_eq!(caps, [20, 20, 45, 30, 0, 40, 35, 32]);
+        assert_eq!(bases, [0, 20, 40, 85, 115, 115, 155, 190]);
+        assert_eq!(total, 222);
+        for i in 0..(NUM_DRAW_COUNT_SLOTS - 1) {
+            assert_eq!(bases[i] + caps[i], bases[i + 1]);
+        }
+
+        // Shadows disabled: csm_caps are all 0
+        let (bases_no_shad, caps_no_shad, total_no_shad) =
+            compute_indirect_layout([10, 10, 25, 12, 1], [0, 0, 0]);
+        assert_eq!(caps_no_shad, [10, 10, 25, 12, 1, 0, 0, 0]);
+        assert_eq!(bases_no_shad, [0, 10, 20, 45, 57, 58, 58, 58]);
+        assert_eq!(total_no_shad, 58);
     }
 }
 

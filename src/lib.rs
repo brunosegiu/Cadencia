@@ -277,6 +277,7 @@ impl WindowGpuState {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cadencia_device"),
+                required_features: crate::renderer::preferred_device_features(&adapter),
                 required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 ..Default::default()
             })
@@ -750,6 +751,8 @@ pub fn render_headless_screenshot_at_distance(
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("cadencia_headless_dev"),
+        required_features: crate::renderer::preferred_device_features(&adapter),
+        required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
         ..Default::default()
     }))
     .map_err(|e| format!("device error: {e:?}"))?;
