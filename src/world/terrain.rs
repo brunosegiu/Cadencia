@@ -255,6 +255,41 @@ fn build_recursive_octree_node(
     node_idx
 }
 
+fn tighten_octree_bounds_from_aabbs(
+    nodes: &mut [OctreeNode],
+    node_idx: usize,
+    sector_aabbs: &[(Vec3, Vec3)],
+) -> (Vec3, Vec3) {
+    if let Some(sid) = nodes[node_idx].leaf_sector_id {
+        let (a_min, a_max) = sector_aabbs[sid as usize];
+        nodes[node_idx].aabb_min = a_min;
+        nodes[node_idx].aabb_max = a_max;
+        return (a_min, a_max);
+    }
+    let children = nodes[node_idx].children;
+    let mut b_min = Vec3::splat(f32::MAX);
+    let mut b_max = Vec3::splat(f32::MIN);
+    for c_idx in children.into_iter().flatten() {
+        let (c_min, c_max) = tighten_octree_bounds_from_aabbs(nodes, c_idx, sector_aabbs);
+        b_min = b_min.min(c_min);
+        b_max = b_max.max(c_max);
+    }
+    if b_min.x <= b_max.x {
+        nodes[node_idx].aabb_min = b_min;
+        nodes[node_idx].aabb_max = b_max;
+    }
+    (nodes[node_idx].aabb_min, nodes[node_idx].aabb_max)
+}
+
+pub fn update_octree_bounds_from_sector_aabbs(
+    octree: &mut WorldOctree,
+    sector_aabbs: &[(Vec3, Vec3)],
+) {
+    if !octree.nodes.is_empty() && !sector_aabbs.is_empty() {
+        tighten_octree_bounds_from_aabbs(&mut octree.nodes, octree.root, sector_aabbs);
+    }
+}
+
 fn tighten_octree_bounds(nodes: &mut [OctreeNode], node_idx: usize, sectors: &[WorldSector]) -> (Vec3, Vec3) {
     if let Some(sid) = nodes[node_idx].leaf_sector_id {
         let sec = &sectors[sid as usize];
@@ -275,6 +310,45 @@ fn tighten_octree_bounds(nodes: &mut [OctreeNode], node_idx: usize, sectors: &[W
         nodes[node_idx].aabb_max = b_max;
     }
     (nodes[node_idx].aabb_min, nodes[node_idx].aabb_max)
+}
+
+fn prop_conservative_local_bounds(model: ModelId) -> (Vec3, Vec3) {
+    match model {
+        ModelId::RamblaBuilding(0..=3) => (Vec3::new(-8.5, -1.0, -8.5), Vec3::new(8.5, 15.0, 8.5)),
+        ModelId::RamblaBuilding(4..=7) => (Vec3::new(-9.5, -1.0, -9.5), Vec3::new(9.5, 24.0, 9.5)),
+        ModelId::RamblaBuilding(8..=13) => {
+            (Vec3::new(-10.5, -1.0, -10.5), Vec3::new(10.5, 31.0, 10.5))
+        }
+        ModelId::RamblaBuilding(_) => (Vec3::new(-11.0, -1.0, -11.0), Vec3::new(11.0, 48.0, 11.0)),
+        ModelId::CoastalBuildingTall => {
+            (Vec3::new(-10.5, -1.0, -10.5), Vec3::new(10.5, 28.0, 10.5))
+        }
+        ModelId::CoastalBuildingMid => (Vec3::new(-9.5, -1.0, -9.5), Vec3::new(9.5, 18.0, 9.5)),
+        ModelId::ColonialTownhouse | ModelId::RanchHouse => {
+            (Vec3::new(-9.5, -1.0, -9.5), Vec3::new(9.5, 12.0, 9.5))
+        }
+        ModelId::PalmTree
+        | ModelId::TreeEucalyptus(_)
+        | ModelId::TreeOmbu(_)
+        | ModelId::TreeCeibo(_)
+        | ModelId::TreeCanopy
+        | ModelId::TreePine => (Vec3::new(-8.0, -1.0, -8.0), Vec3::new(8.0, 22.0, 8.0)),
+        _ => (Vec3::new(-6.0, -1.0, -6.0), Vec3::new(6.0, 10.0, 6.0)),
+    }
+}
+
+fn prop_conservative_world_aabb(p: &PropInstance) -> (Vec3, Vec3) {
+    let pos = p.transform.w_axis.truncate();
+    let sx = p.transform.x_axis.truncate().length();
+    let sy = p.transform.y_axis.truncate().length();
+    let sz = p.transform.z_axis.truncate().length();
+    let h_sc = sx.max(sz).max(0.01);
+    let v_sc = sy.max(0.01);
+    let (lmin, lmax) = prop_conservative_local_bounds(p.model);
+    (
+        pos + Vec3::new(lmin.x * h_sc, lmin.y * v_sc, lmin.z * h_sc),
+        pos + Vec3::new(lmax.x * h_sc, lmax.y * v_sc, lmax.z * h_sc),
+    )
 }
 
 fn partition_indices_by_octree(
@@ -1026,7 +1100,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                 }
 
                 // 2. Left Avenue Buildings: 23 distinct Montevideo Rambla building types (RamblaBuilding(0..19) + 3 classic models)
-                //    Plus Campo trees & bushes planted in the building forecourts / courtyards!
                 if idx % 2 == 0 {
                     let b_idx = idx / 2;
                     let dist_from_hero = (d - hero_d).rem_euclid(total);
@@ -1083,48 +1156,6 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
                         tint,
                         0.90,
                         1.0,
-                        true,
-                    );
-
-                    // Reuse Campo trees & flowering bushes right in front of / between the buildings (garden forecourts)
-                    let v_g = ((b_idx * 3 + 1) % 10) as u8;
-                    let forecourt_pos = s.pos + s.tangent * 4.4 - s.right * (road_hw + 6.2) + Vec3::Y * 0.12;
-                    let garden_tree = match b_idx % 4 {
-                        0 => ModelId::TreeOmbu(v_g),
-                        1 => ModelId::TreeCeibo(v_g),
-                        2 => ModelId::SmallPalm(v_g),
-                        _ => ModelId::TreeEucalyptus(v_g),
-                    };
-                    let g_sc = match b_idx % 4 {
-                        0 => 0.84,
-                        1 => 0.92,
-                        2 => 1.02,
-                        _ => 0.88,
-                    };
-                    push_prop(
-                        garden_tree,
-                        forecourt_pos,
-                        yaw + (b_idx as f32) * 1.3,
-                        Vec3::splat(g_sc),
-                        [1.0; 4],
-                        0.82,
-                        0.0,
-                        true,
-                    );
-                    // Flowering CeiboBush / ChircaBush hedges framing building entrances
-                    let bush_model = if b_idx % 2 == 0 {
-                        ModelId::CeiboBush(v_g)
-                    } else {
-                        ModelId::ChircaBush(v_g)
-                    };
-                    push_prop(
-                        bush_model,
-                        s.pos - s.tangent * 3.2 - s.right * (road_hw + 6.4) + Vec3::Y * 0.10,
-                        yaw + (b_idx as f32) * 0.9,
-                        Vec3::splat(0.85),
-                        [1.0; 4],
-                        0.80,
-                        0.0,
                         true,
                     );
                 }
@@ -1669,8 +1700,9 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
     }
     for p in &props {
         let pos = p.transform.w_axis.truncate();
-        world_min = world_min.min(pos - Vec3::splat(16.0));
-        world_max = world_max.max(pos + Vec3::splat(16.0));
+        let (p_min, p_max) = prop_conservative_world_aabb(p);
+        world_min = world_min.min(p_min);
+        world_max = world_max.max(p_max);
         sample_points.push(pos);
     }
     world_min -= Vec3::splat(2.0);
@@ -1727,9 +1759,9 @@ pub fn build_biome_world(biome: BiomeId, spline: &RouteSpline) -> StaticWorldGeo
         let sid = (octree.find_leaf_sector(pos) as usize).min(num_sectors - 1);
         p.sector_id = sid as u32;
         sector_props[sid].push(pi);
-        let pad = Vec3::splat(16.0);
-        sector_tight_bounds[sid].0 = sector_tight_bounds[sid].0.min(pos - pad);
-        sector_tight_bounds[sid].1 = sector_tight_bounds[sid].1.max(pos + pad);
+        let (p_min, p_max) = prop_conservative_world_aabb(p);
+        sector_tight_bounds[sid].0 = sector_tight_bounds[sid].0.min(p_min);
+        sector_tight_bounds[sid].1 = sector_tight_bounds[sid].1.max(p_max);
     }
 
     let mut sectors = Vec::with_capacity(num_sectors);

@@ -576,6 +576,10 @@ mod tests {
             .props
             .iter()
             .any(|p| matches!(p.model, crate::assets::ModelId::RamblaSeated(_))));
+        assert!(!rambla_geo.props.iter().any(|p| matches!(
+            p.model,
+            crate::assets::ModelId::CeiboBush(_) | crate::assets::ModelId::ChircaBush(_)
+        )));
 
         let mut rambla_walkers =
             crate::world::riders::spawn_biome_animals(BiomeId::CoastalPromenade, &rambla_sp);
@@ -595,5 +599,187 @@ mod tests {
             &mut rambla_walkers,
         );
         assert!((rambla_walkers[0].dist_m - w0_d).abs() > 0.05);
+    }
+
+    #[test]
+    fn rambla_tall_buildings_never_clipped_or_culled_across_csm_cascades() {
+        use crate::assets::{AssetBank, ModelId};
+        use crate::renderer::{compute_csm_cascade_vp, CSM_ORTHO_RADII, NUM_SHADOW_CASCADES};
+        use crate::world::terrain::{Frustum, OctreeNode};
+
+        fn collect_ancestors(
+            nodes: &[OctreeNode],
+            node_idx: usize,
+            target_sid: u32,
+            path: &mut Vec<usize>,
+        ) -> bool {
+            path.push(node_idx);
+            let node = &nodes[node_idx];
+            if node.leaf_sector_id == Some(target_sid) {
+                return true;
+            }
+            for c_idx in node.children.into_iter().flatten() {
+                if collect_ancestors(nodes, c_idx, target_sid, path) {
+                    return true;
+                }
+            }
+            path.pop();
+            false
+        }
+
+        let sp = RouteSpline::for_biome(BiomeId::CoastalPromenade);
+        let geo = crate::world::terrain::build_biome_world(BiomeId::CoastalPromenade, &sp);
+        let assets = AssetBank::load_embedded();
+
+        struct BuildingBounds {
+            sector_id: usize,
+            sphere_center: Vec3,
+            sphere_radius: f32,
+            world_verts: Vec<Vec3>,
+        }
+
+        let mut buildings = Vec::new();
+        for p in &geo.props {
+            if !matches!(
+                p.model,
+                ModelId::RamblaBuilding(_)
+                    | ModelId::ColonialTownhouse
+                    | ModelId::CoastalBuildingMid
+                    | ModelId::CoastalBuildingTall
+            ) {
+                continue;
+            }
+            let model = assets.get(p.model);
+            let mut b_min = Vec3::splat(f32::MAX);
+            let mut b_max = Vec3::splat(f32::MIN);
+            let mut world_verts = Vec::new();
+            for sec in &model.sections {
+                for v in &sec.vertices {
+                    let wp = p.transform.transform_point3(Vec3::from(v.pos));
+                    b_min = b_min.min(wp);
+                    b_max = b_max.max(wp);
+                    world_verts.push(wp);
+                }
+            }
+
+            let sid = p.sector_id as usize;
+            let sector = &geo.sectors[sid];
+            assert!(
+                b_min.x >= sector.aabb_min.x
+                    && b_min.y >= sector.aabb_min.y
+                    && b_min.z >= sector.aabb_min.z
+                    && b_max.x <= sector.aabb_max.x
+                    && b_max.y <= sector.aabb_max.y
+                    && b_max.z <= sector.aabb_max.z,
+                "building {:?} bounds ({:?}..{:?}) exceed sector {} AABB ({:?}..{:?})",
+                p.model,
+                b_min,
+                b_max,
+                sid,
+                sector.aabb_min,
+                sector.aabb_max
+            );
+
+            let mut ancestors = Vec::new();
+            assert!(collect_ancestors(&geo.octree.nodes, geo.octree.root, p.sector_id, &mut ancestors));
+            for anc_idx in ancestors {
+                let anc = &geo.octree.nodes[anc_idx];
+                assert!(
+                    b_min.x >= anc.aabb_min.x
+                        && b_min.y >= anc.aabb_min.y
+                        && b_min.z >= anc.aabb_min.z
+                        && b_max.x <= anc.aabb_max.x
+                        && b_max.y <= anc.aabb_max.y
+                        && b_max.z <= anc.aabb_max.z,
+                    "building {:?} bounds ({:?}..{:?}) exceed octree ancestor {} AABB ({:?}..{:?})",
+                    p.model,
+                    b_min,
+                    b_max,
+                    anc_idx,
+                    anc.aabb_min,
+                    anc.aabb_max
+                );
+            }
+
+            let sx = p.transform.x_axis.truncate().length();
+            let sy = p.transform.y_axis.truncate().length();
+            let sz = p.transform.z_axis.truncate().length();
+            let max_scale = sx.max(sy).max(sz).max(0.01);
+            let sphere_center = p.transform.transform_point3(model.bounds_center);
+            let sphere_radius = model.bounding_radius * max_scale;
+
+            buildings.push(BuildingBounds {
+                sector_id: sid,
+                sphere_center,
+                sphere_radius,
+                world_verts,
+            });
+        }
+        assert!(!buildings.is_empty());
+
+        let sun_dir = geo.hero_sun_dir;
+        let shadow_sun_dir = Vec3::new(sun_dir.x, sun_dir.y.max(0.46), sun_dir.z).normalize();
+        let mut test_dists = vec![sp.hero_start_dist_m, sp.hero_start_dist_m + 400.0];
+        let mut d = 0.0_f32;
+        while d < sp.total_length_m {
+            test_dists.push(d);
+            d += 120.0;
+        }
+
+        for dist_m in test_dists {
+            let s = sp.sample(dist_m);
+            let player_pos = s.pos + s.right * BiomeId::CoastalPromenade.player_lane_lat_m();
+            let cam_pos = player_pos - s.tangent * 4.45 + s.up * 1.94 + s.right * 0.02;
+            let cam_target = player_pos + s.tangent * 15.5 + s.up * 0.85;
+            let view_fwd = (cam_target - cam_pos).normalize_or_zero();
+            let csm_centers = [
+                player_pos + s.tangent * 3.0,
+                cam_pos + view_fwd * 28.0,
+                cam_pos + view_fwd * 86.0,
+            ];
+
+            for ci in 0..NUM_SHADOW_CASCADES {
+                let vp = compute_csm_cascade_vp(csm_centers[ci], shadow_sun_dir, CSM_ORTHO_RADII[ci]);
+                let frustum = Frustum::from_view_proj(vp);
+                let mut vis_sectors = Vec::new();
+                geo.octree.query_frustum(&frustum, &mut vis_sectors);
+
+                for b in &buildings {
+                    let mut any_in_ortho_xy = false;
+                    for &v in &b.world_verts {
+                        let clip = vp * v.extend(1.0);
+                        let ndc = clip.truncate() / clip.w;
+                        if ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 {
+                            any_in_ortho_xy = true;
+                            assert!(
+                                ndc.z >= 0.0 && ndc.z <= 1.0,
+                                "building vertex {:?} clipped in cascade {} at dist {} (ndc.z = {})",
+                                v,
+                                ci,
+                                dist_m,
+                                ndc.z
+                            );
+                        }
+                    }
+                    if any_in_ortho_xy {
+                        assert!(
+                            vis_sectors.contains(&b.sector_id),
+                            "sector {} missing in cascade {} octree query at dist {}",
+                            b.sector_id,
+                            ci,
+                            dist_m
+                        );
+                        assert!(
+                            frustum.intersects_sphere(b.sphere_center, b.sphere_radius),
+                            "building sphere ({:?}, r={}) culled in cascade {} at dist {}",
+                            b.sphere_center,
+                            b.sphere_radius,
+                            ci,
+                            dist_m
+                        );
+                    }
+                }
+            }
+        }
     }
 }

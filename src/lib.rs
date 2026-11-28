@@ -726,6 +726,19 @@ pub fn render_headless_screenshot_screen(
     height: u32,
     camera_mode: CameraMode,
 ) -> Result<(), String> {
+    render_headless_screenshot_at_distance(out_path, biome, screen, width, height, camera_mode, None)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn render_headless_screenshot_at_distance(
+    out_path: &str,
+    biome: BiomeId,
+    screen: AppScreen,
+    width: u32,
+    height: u32,
+    camera_mode: CameraMode,
+    distance_override_m: Option<f32>,
+) -> Result<(), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -745,6 +758,11 @@ pub fn render_headless_screenshot_screen(
     let assets = AssetBank::load_embedded();
     let mut renderer = LigneClaireRenderer::new(&device, format, width, height, &assets);
     let mut sim = CadenciaSim::new_with_screen(biome, screen, camera_mode);
+    if let Some(d) = distance_override_m {
+        let s = sim.spline.sample(d);
+        sim.physics = RiderPhysicsState::new_hero_default(d, s.pos.y, s.grade_pct);
+        sim.ai_riders = spawn_ai_peloton(d, sim.spline.total_length_m);
+    }
     renderer.upload_world(&device, &sim.world_geo);
 
     let out_tex = device.create_texture(&wgpu::TextureDescriptor {

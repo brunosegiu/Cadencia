@@ -90,7 +90,7 @@ pub fn default_player_profile() -> RiderProfile {
         helmet_color: [0.430, 0.460, 0.500, 1.0],     // matte slate-grey aero road shell
         helmet_accent: [0.780, 0.310, 0.290, 1.0],    // dusty crimson aero rib stripes
         frame_color: [0.463, 0.525, 0.588, 1.0],      // classic slate-blue road frame
-        has_backpack: true,
+        has_backpack: false,
         avatar_skin: [226, 178, 140],
         avatar_hair: [156, 102, 62],
         avatar_shirt: [72, 146, 206],

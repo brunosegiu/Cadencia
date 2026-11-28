@@ -10,11 +10,33 @@ use crate::world::riders::{
     build_animal_draw_parts, build_rider_draw_parts, AiRider, DynamicAnimal, RiderPartDraw,
     RiderPoseMode, RiderProfile, BIKE_COMPUTER_SCREEN_CORNERS, MAX_CYCLIST_BONES,
 };
-use crate::world::terrain::{Frustum, StaticWorldGeometry};
+use crate::world::terrain::{Frustum, StaticWorldGeometry, WorldOctree};
 use crate::world::{BiomeId, RouteSpline};
 
 pub const SHADOW_MAP_SIZE: u32 = 2048;
 pub const NUM_SHADOW_CASCADES: usize = 3;
+pub const CSM_ORTHO_RADII: [f32; NUM_SHADOW_CASCADES] = [12.0, 42.0, 128.0];
+
+/// Computes a texel-snapped orthographic light-space view-projection matrix for one CSM cascade,
+/// extending the depth range upstream/downstream by `1 / sin(elevation)` so tall buildings and
+/// steep canyon slopes are never clipped by the shadow near/far planes.
+pub fn compute_csm_cascade_vp(center: Vec3, shadow_sun_dir: Vec3, r_ortho: f32) -> Mat4 {
+    let sin_e = shadow_sun_dir.y.max(0.25);
+    let cos_e = (1.0 - sin_e * sin_e).max(0.0).sqrt();
+    let cot_e = cos_e / sin_e;
+    let z_back = r_ortho * cot_e + 85.0 / sin_e;
+    let z_front = r_ortho * cot_e + 40.0 / sin_e;
+    let texel_world = (2.0 * r_ortho) / (SHADOW_MAP_SIZE as f32);
+    let light_rot_origin = Mat4::look_at_rh(shadow_sun_dir * 55.0, Vec3::ZERO, Vec3::Y);
+    let c_ls = light_rot_origin.transform_point3(center);
+    let dx = c_ls.x - (c_ls.x / texel_world).round() * texel_world;
+    let dy = c_ls.y - (c_ls.y / texel_world).round() * texel_world;
+    let light_view = Mat4::from_translation(Vec3::new(dx, dy, 0.0))
+        * Mat4::look_at_rh(center + shadow_sun_dir * z_back, center, Vec3::Y);
+    let light_proj =
+        Mat4::orthographic_rh(-r_ortho, r_ortho, -r_ortho, r_ortho, 1.5, z_back + z_front);
+    light_proj * light_view
+}
 pub const MAX_SKINNED_VERTS: usize = 524288;
 pub const MAX_SKIN_JOBS: usize = 512;
 pub const MAX_SKIN_BONES: usize = 2048;
@@ -283,6 +305,7 @@ pub struct LigneClaireRenderer {
     static_draw_descs: Vec<GpuDrawDesc>,
     static_sector_cmds: Vec<StaticSectorCmd>,
     static_descs_dirty: bool,
+    world_octree: WorldOctree,
 
     mega_vb: wgpu::Buffer,
     mega_ib: wgpu::Buffer,
@@ -1277,6 +1300,10 @@ impl LigneClaireRenderer {
             static_draw_descs: Vec::new(),
             static_sector_cmds: Vec::new(),
             static_descs_dirty: true,
+            world_octree: WorldOctree {
+                nodes: Vec::new(),
+                root: 0,
+            },
             mega_vb,
             mega_ib,
             world_offsets,
@@ -1604,6 +1631,8 @@ impl LigneClaireRenderer {
         // Pre-bake static sector draw descriptors and per-sector CSM-size-tiered prop meshes
         let mut static_draw_descs: Vec<GpuDrawDesc> = Vec::with_capacity(geo.sectors.len() * 7);
         let mut static_sector_cmds: Vec<StaticSectorCmd> = Vec::with_capacity(geo.sectors.len() * 7);
+        let mut exact_sector_bounds: Vec<(Vec3, Vec3)> =
+            geo.sectors.iter().map(|s| (s.aabb_min, s.aabb_max)).collect();
 
         for (sid, sec) in geo.sectors.iter().enumerate() {
             let sec_flag = (sid as u32) | 512u32; // bit 9 = is_sector_surface
@@ -1836,7 +1865,11 @@ impl LigneClaireRenderer {
                     all_indices.extend_from_slice(&tier_indices[tier_idx]);
 
                     let t_center = (tier_min[tier_idx] + tier_max[tier_idx]) * 0.5;
-                    let t_radius = (tier_max[tier_idx] - t_center).length().max(0.5);
+                    let t_radius = (tier_max[tier_idx] - t_center).length().max(0.5) + 1.0;
+                    exact_sector_bounds[sid].0 =
+                        exact_sector_bounds[sid].0.min(tier_min[tier_idx] - Vec3::splat(1.0));
+                    exact_sector_bounds[sid].1 =
+                        exact_sector_bounds[sid].1.max(tier_max[tier_idx] + Vec3::splat(1.0));
                     let (cast_shadow, rep_caster_cm, caster_tier): (bool, u32, u8) = match tier_idx {
                         0 => (false, 0, 0),
                         1 => (true, 50, 1),  // 0.50 m -> Cascade 0 only
@@ -1892,6 +1925,11 @@ impl LigneClaireRenderer {
         self.static_draw_descs = static_draw_descs;
         self.static_sector_cmds = static_sector_cmds;
         self.static_descs_dirty = true;
+        self.world_octree = geo.octree.clone();
+        crate::world::terrain::update_octree_bounds_from_sector_aabbs(
+            &mut self.world_octree,
+            &exact_sector_bounds,
+        );
         self.taa_history_valid = false;
         self.skin_bg = Self::make_skin_bg(
             device,
@@ -2135,25 +2173,13 @@ impl LigneClaireRenderer {
                 cam_pos + view_fwd * 86.0,
             ]
         };
-        let csm_ortho_radii: [f32; NUM_SHADOW_CASCADES] = [12.0, 42.0, 128.0];
+        let csm_ortho_radii = CSM_ORTHO_RADII;
         let csm_split_depths: [f32; NUM_SHADOW_CASCADES] = [18.0, 68.0, 215.0];
         let csm_min_caster_r: [f32; NUM_SHADOW_CASCADES] = [0.0, 0.90, 2.50];
         let csm_max_caster_r: [f32; NUM_SHADOW_CASCADES] = [28.0, 45.0, 90.0];
 
-        let light_rot_origin = Mat4::look_at_rh(shadow_sun_dir * 55.0, Vec3::ZERO, Vec3::Y);
         let cascade_vp: [Mat4; NUM_SHADOW_CASCADES] = std::array::from_fn(|ci| {
-            let center = csm_centers[ci];
-            let r_ortho = csm_ortho_radii[ci];
-            let z_half = (r_ortho * 1.6).max(48.0);
-            let texel_world = (2.0 * r_ortho) / (SHADOW_MAP_SIZE as f32);
-            let c_ls = light_rot_origin.transform_point3(center);
-            let dx = (c_ls.x / texel_world).round() * texel_world - c_ls.x;
-            let dy = (c_ls.y / texel_world).round() * texel_world - c_ls.y;
-            let light_view = Mat4::from_translation(Vec3::new(dx, dy, 0.0))
-                * Mat4::look_at_rh(center + shadow_sun_dir * z_half, center, Vec3::Y);
-            let light_proj =
-                Mat4::orthographic_rh(-r_ortho, r_ortho, -r_ortho, r_ortho, 1.5, z_half * 2.0);
-            light_proj * light_view
+            compute_csm_cascade_vp(csm_centers[ci], shadow_sun_dir, csm_ortho_radii[ci])
         });
 
         let (sun_col, sky_zen, sky_hor, fog_col, fog_dens, disc_str) = match biome {
@@ -2245,9 +2271,15 @@ impl LigneClaireRenderer {
         let mut shadow_sector_mask = [0u32, 0u32, 0u32, 1u32 << 31];
         let mut csm_sector_masks = [[0u32, 0u32, 0u32, 1u32 << 31]; NUM_SHADOW_CASCADES];
 
+        let active_octree = if self.world_octree.nodes.is_empty() {
+            &geo.octree
+        } else {
+            &self.world_octree
+        };
+
         // 1. Traverse 3D WorldOctree against Camera View Frustum on CPU
         let mut cam_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
-        geo.octree.query_frustum(&cam_frustum, &mut cam_vis_sectors);
+        active_octree.query_frustum(&cam_frustum, &mut cam_vis_sectors);
         for sid in cam_vis_sectors {
             if sid < geo.sectors.len() {
                 set_sector_bit(&mut cam_sector_mask, sid);
@@ -2259,7 +2291,7 @@ impl LigneClaireRenderer {
             let mut csm_vis_sectors: Vec<usize> = Vec::with_capacity(geo.sectors.len());
             for (ci, csm_f) in csm_frustums.iter().enumerate() {
                 csm_vis_sectors.clear();
-                geo.octree.query_frustum(csm_f, &mut csm_vis_sectors);
+                active_octree.query_frustum(csm_f, &mut csm_vis_sectors);
                 for &sid in &csm_vis_sectors {
                     if sid < geo.sectors.len() {
                         set_sector_bit(&mut shadow_sector_mask, sid);

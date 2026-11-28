@@ -79,7 +79,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
         let ndc0 = sp0.xyz / sp0.w;
         let box0 = max(abs(ndc0.x), abs(ndc0.y));
         if (box0 < 0.94 && ndc0.z >= 0.0 && ndc0.z <= 1.0) {
-            let bias0 = max(0.00018 * slope, 0.00005);
+            let bias0 = max(0.00007 * slope, 0.000022);
             let s0 = sample_shadow_cascade(sp0, 0, bias0, 1.15);
             let blend1 = max(
                 smoothstep(0.80, 0.94, box0),
@@ -88,7 +88,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
             if (blend1 > 0.01) {
                 let wp1 = vec4<f32>(world_pos + world_normal * (0.012 * slope), 1.0);
                 let sp1 = frame.light_view_proj_c1 * wp1;
-                let bias1 = max(0.00030 * slope, 0.00010);
+                let bias1 = max(0.00011 * slope, 0.000038);
                 let s1 = sample_shadow_cascade(sp1, 1, bias1, 1.0);
                 return mix(s0, s1, blend1);
             }
@@ -102,7 +102,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
         let ndc1 = sp1.xyz / sp1.w;
         let box1 = max(abs(ndc1.x), abs(ndc1.y));
         if (box1 < 0.95 && ndc1.z >= 0.0 && ndc1.z <= 1.0) {
-            let bias1 = max(0.00030 * slope, 0.00010);
+            let bias1 = max(0.00011 * slope, 0.000038);
             let s1 = sample_shadow_cascade(sp1, 1, bias1, 1.0);
             let blend2 = max(
                 smoothstep(0.82, 0.95, box1),
@@ -111,7 +111,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
             if (blend2 > 0.01) {
                 let wp2 = vec4<f32>(world_pos + world_normal * (0.032 * slope), 1.0);
                 let sp2 = frame.light_view_proj_c2 * wp2;
-                let bias2 = max(0.00042 * slope, 0.00015);
+                let bias2 = max(0.00022 * slope, 0.000075);
                 let s2 = sample_shadow_cascade(sp2, 2, bias2, 0.85);
                 return mix(s1, s2, blend2);
             }
@@ -124,7 +124,7 @@ fn sample_csm_shadow(world_pos: vec3<f32>, world_normal: vec3<f32>, view_depth: 
     let ndc2 = sp2.xyz / sp2.w;
     let box2 = max(abs(ndc2.x), abs(ndc2.y));
     if (box2 < 0.97 && ndc2.z >= 0.0 && ndc2.z <= 1.0) {
-        let bias2 = max(0.00042 * slope, 0.00015);
+        let bias2 = max(0.00022 * slope, 0.000075);
         let s2 = sample_shadow_cascade(sp2, 2, bias2, 0.85);
         let fade_far = max(
             smoothstep(0.84, 0.97, box2),

@@ -17,12 +17,19 @@ fn main() {
         let mut width = 1280_u32;
         let mut height = 960_u32;
         let mut camera = CameraMode::Chase;
+        let mut distance_override_m: Option<f32> = None;
 
         let mut i = 1;
         while i < args.len() {
             match args[i].as_str() {
                 "--screenshot" if i + 1 < args.len() => {
                     screenshot_path = Some(args[i + 1].clone());
+                    i += 2;
+                }
+                "--distance" if i + 1 < args.len() => {
+                    if let Ok(d) = args[i + 1].parse() {
+                        distance_override_m = Some(d);
+                    }
                     i += 2;
                 }
                 "--level" if i + 1 < args.len() => {
@@ -91,9 +98,15 @@ fn main() {
                 AppScreen::MainMenu
             });
             let biome = explicit_biome.unwrap_or_else(BiomeId::random);
-            if let Err(err) =
-                cadencia_lib::render_headless_screenshot_screen(&out, biome, screen, width, height, camera)
-            {
+            if let Err(err) = cadencia_lib::render_headless_screenshot_at_distance(
+                &out,
+                biome,
+                screen,
+                width,
+                height,
+                camera,
+                distance_override_m,
+            ) {
                 eprintln!("Screenshot failed: {err}");
                 std::process::exit(1);
             }
