@@ -672,10 +672,10 @@ pub fn build_rider_draw_parts(
     let (i_ca_l,  p_ca_l)  = get_bind("Calf_L",     Vec3::new(-0.102, -0.2673, -0.3368));
     let (i_fo_l,  p_fo_l)  = get_bind("Foot_L",     Vec3::new(-0.124, -0.6477, -0.1979));
     let (i_ua_r,  p_ua_r)  = get_bind("UpperArm_R", Vec3::new( 0.172,  0.335, -0.195));
-    let (i_fa_r,  _p_fa_r) = get_bind("Forearm_R",  Vec3::new( 0.218,  0.082, -0.405));
+    let (i_fa_r,  _p_fa_r) = get_bind("Forearm_R",  Vec3::new( 0.172,  0.052, -0.356));
     let (i_ha_r,  _)       = get_bind("Hand_R",     Vec3::new( 0.198, -0.062, -0.574));
     let (i_ua_l,  p_ua_l)  = get_bind("UpperArm_L", Vec3::new(-0.172,  0.335, -0.195));
-    let (i_fa_l,  _p_fa_l) = get_bind("Forearm_L",  Vec3::new(-0.218,  0.082, -0.405));
+    let (i_fa_l,  _p_fa_l) = get_bind("Forearm_L",  Vec3::new(-0.172,  0.052, -0.356));
     let (i_ha_l,  _)       = get_bind("Hand_L",     Vec3::new(-0.198, -0.062, -0.574));
 
     let m_pelvis = Mat4::IDENTITY;

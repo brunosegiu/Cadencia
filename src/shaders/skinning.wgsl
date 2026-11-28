@@ -47,6 +47,69 @@ fn rot_y_vec(v: vec3<f32>, ang: f32) -> vec3<f32> {
     return vec3<f32>(v.x * c + v.z * s, v.y, -v.x * s + v.z * c);
 }
 
+struct DualQuat {
+    r: vec4<f32>,
+    d: vec4<f32>,
+};
+
+fn mat4_to_dual_quat(m: mat4x4<f32>) -> DualQuat {
+    let m00 = m[0].x;
+    let m01 = m[1].x;
+    let m02 = m[2].x;
+    let m10 = m[0].y;
+    let m11 = m[1].y;
+    let m12 = m[2].y;
+    let m20 = m[0].z;
+    let m21 = m[1].z;
+    let m22 = m[2].z;
+
+    let tr = m00 + m11 + m22;
+    var qr: vec4<f32>;
+    if (tr > 0.0) {
+        let s = sqrt(tr + 1.0) * 2.0;
+        qr = vec4<f32>(
+            (m21 - m12) / s,
+            (m02 - m20) / s,
+            (m10 - m01) / s,
+            0.25 * s,
+        );
+    } else if (m00 > m11 && m00 > m22) {
+        let s = sqrt(max(1.0 + m00 - m11 - m22, 1e-8)) * 2.0;
+        qr = vec4<f32>(
+            0.25 * s,
+            (m01 + m10) / s,
+            (m02 + m20) / s,
+            (m21 - m12) / s,
+        );
+    } else if (m11 > m22) {
+        let s = sqrt(max(1.0 + m11 - m00 - m22, 1e-8)) * 2.0;
+        qr = vec4<f32>(
+            (m01 + m10) / s,
+            0.25 * s,
+            (m12 + m21) / s,
+            (m02 - m20) / s,
+        );
+    } else {
+        let s = sqrt(max(1.0 + m22 - m00 - m11, 1e-8)) * 2.0;
+        qr = vec4<f32>(
+            (m02 + m20) / s,
+            (m12 + m21) / s,
+            0.25 * s,
+            (m10 - m01) / s,
+        );
+    }
+    qr = normalize(qr);
+
+    let t = m[3].xyz;
+    let qd = vec4<f32>(
+        0.5 * (t.x * qr.w + t.y * qr.z - t.z * qr.y),
+        0.5 * (-t.x * qr.z + t.y * qr.w + t.z * qr.x),
+        0.5 * (t.x * qr.y - t.y * qr.x + t.z * qr.w),
+        0.5 * (-t.x * qr.x - t.y * qr.y - t.z * qr.z),
+    );
+    return DualQuat(qr, qd);
+}
+
 struct PosedVertex {
     pos: vec3<f32>,
     nrm: vec3<f32>,
@@ -357,7 +420,7 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
     var local_nrm = normalize(unpacked_nrm.xyz);
 
     if (job.skin_pose_r.w >= 7.5) {
-        // True glTF 4-bone skeletal skinning (single unified rigged cyclist mesh: head, neck, torso, arms, wrists, hands, pelvis, legs, feet)
+        // Dual-Quaternion Skinning (Preserve Volume) for 4-bone glTF skeleton
         let sw = src_weights[job.src_offset + vid];
         let j0 = sw.joints & 255u;
         let j1 = (sw.joints >> 8u) & 255u;
@@ -368,13 +431,31 @@ fn cs_skin_vertices(@builtin(global_invocation_id) gid: vec3<u32>) {
         let wn = w_raw / w_sum;
 
         let b = job.bone_offset;
-        let m = bone_mats[b + j0] * wn.x
-              + bone_mats[b + j1] * wn.y
-              + bone_mats[b + j2] * wn.z
-              + bone_mats[b + j3] * wn.w;
-        local_pos = (m * vec4<f32>(local_pos, 1.0)).xyz;
-        let nrm_mat = mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz);
-        local_nrm = normalize(nrm_mat * local_nrm);
+        let dq0 = mat4_to_dual_quat(bone_mats[b + j0]);
+        let dq1 = mat4_to_dual_quat(bone_mats[b + j1]);
+        let dq2 = mat4_to_dual_quat(bone_mats[b + j2]);
+        let dq3 = mat4_to_dual_quat(bone_mats[b + j3]);
+
+        let s1 = select(1.0, -1.0, dot(dq0.r, dq1.r) < 0.0);
+        let s2 = select(1.0, -1.0, dot(dq0.r, dq2.r) < 0.0);
+        let s3 = select(1.0, -1.0, dot(dq0.r, dq3.r) < 0.0);
+
+        let br = dq0.r * wn.x
+               + dq1.r * (wn.y * s1)
+               + dq2.r * (wn.z * s2)
+               + dq3.r * (wn.w * s3);
+        let bd = dq0.d * wn.x
+               + dq1.d * (wn.y * s1)
+               + dq2.d * (wn.z * s2)
+               + dq3.d * (wn.w * s3);
+
+        let inv_len = inverseSqrt(max(dot(br, br), 1e-10));
+        let qr = br * inv_len;
+        let qd = bd * inv_len;
+        let t = 2.0 * (qr.w * qd.xyz - qd.w * qr.xyz + cross(qr.xyz, qd.xyz));
+
+        local_pos = local_pos + 2.0 * cross(qr.xyz, cross(qr.xyz, local_pos) + qr.w * local_pos) + t;
+        local_nrm = normalize(local_nrm + 2.0 * cross(qr.xyz, cross(qr.xyz, local_nrm) + qr.w * local_nrm));
     } else if (job.skin_pose_r.w >= 6.5) {
         let posed = animate_biped_pedestrian(local_pos, local_nrm, job.skin_pose_r, job.skin_pose_l);
         local_pos = posed.pos;
